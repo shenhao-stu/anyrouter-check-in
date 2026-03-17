@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from datetime import datetime
 
 import httpx
@@ -196,13 +197,8 @@ def _parse_check_in_response(account_name: str, response) -> bool:
 	return False
 
 
-def execute_check_in(client, account_name: str, provider_config, headers: dict):
-	"""执行签到请求，自动适配 one-api(/api/user/sign_in) 和 new-api(/api/user/checkin)"""
-	print(f'[NETWORK] {account_name}: Executing check-in')
-
-	checkin_headers = headers.copy()
-	checkin_headers.update({'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'})
-
+def _do_check_in_request(client, account_name: str, provider_config, checkin_headers: dict):
+	"""发送签到请求（含 404 fallback），返回 response 对象"""
 	sign_in_url = f'{provider_config.domain}{provider_config.sign_in_path}'
 	response = client.post(sign_in_url, headers=checkin_headers, timeout=30)
 
@@ -216,11 +212,47 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 		response = client.post(fallback_url, headers=checkin_headers, timeout=30)
 		print(f'[RESPONSE] {account_name}: Fallback response status code {response.status_code}')
 
-	if response.status_code == 200:
-		return _parse_check_in_response(account_name, response)
-	else:
-		print(f'[FAILED] {account_name}: Check-in failed - HTTP {response.status_code}')
-		return False
+	return response
+
+
+MAX_RETRIES = 2
+RETRY_DELAY = 5
+
+
+def execute_check_in(client, account_name: str, provider_config, headers: dict):
+	"""执行签到请求，自动适配 one-api(/api/user/sign_in) 和 new-api(/api/user/checkin)，含重试"""
+	print(f'[NETWORK] {account_name}: Executing check-in')
+
+	checkin_headers = headers.copy()
+	checkin_headers.update({'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'})
+
+	last_error = None
+	for attempt in range(1, MAX_RETRIES + 1):
+		try:
+			response = _do_check_in_request(client, account_name, provider_config, checkin_headers)
+
+			if response.status_code == 200:
+				return _parse_check_in_response(account_name, response)
+
+			# 5xx 服务端错误可重试
+			if response.status_code >= 500 and attempt < MAX_RETRIES:
+				print(f'[RETRY] {account_name}: HTTP {response.status_code}, retrying in {RETRY_DELAY}s ({attempt}/{MAX_RETRIES})')
+				time.sleep(RETRY_DELAY)
+				continue
+
+			print(f'[FAILED] {account_name}: Check-in failed - HTTP {response.status_code}')
+			return False
+
+		except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, OSError) as e:
+			last_error = e
+			if attempt < MAX_RETRIES:
+				print(f'[RETRY] {account_name}: {type(e).__name__}, retrying in {RETRY_DELAY}s ({attempt}/{MAX_RETRIES})')
+				time.sleep(RETRY_DELAY)
+				continue
+			raise
+
+	print(f'[FAILED] {account_name}: Check-in failed after {MAX_RETRIES} attempts - {last_error}')
+	return False
 
 
 def format_check_in_notification(detail: dict) -> str:
@@ -331,11 +363,19 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		}
 
 		user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
-		user_info_before = get_user_info(client, headers, user_info_url)
-		if user_info_before and user_info_before.get('success'):
-			print(user_info_before['display'])
-		elif user_info_before:
-			print(user_info_before.get('error', 'Unknown error'))
+
+		# 获取用户信息（带重试，防止网络抖动）
+		user_info_before = None
+		for attempt in range(1, MAX_RETRIES + 1):
+			user_info_before = get_user_info(client, headers, user_info_url)
+			if user_info_before and user_info_before.get('success'):
+				print(user_info_before['display'])
+				break
+			if attempt < MAX_RETRIES:
+				print(f'[RETRY] {account_name}: Failed to get user info, retrying in {RETRY_DELAY}s ({attempt}/{MAX_RETRIES})')
+				time.sleep(RETRY_DELAY)
+			elif user_info_before:
+				print(user_info_before.get('error', 'Unknown error'))
 
 		if provider_config.needs_manual_check_in():
 			success = execute_check_in(client, account_name, provider_config, headers)
