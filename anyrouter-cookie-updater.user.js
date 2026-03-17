@@ -271,6 +271,53 @@
     return { success: successCount > 0, summary };
   }
 
+  // ──────────────────────────────────────────────
+  //  Known built-in providers (excluded from PROVIDERS secret — already hardcoded in checkin.py)
+  // ──────────────────────────────────────────────
+  const BUILTIN_PROVIDERS = new Set(['anyrouter', 'agentrouter']);
+
+  // Key for storing locally-tracked custom providers (provider_name -> domain)
+  const CUSTOM_PROVIDERS_KEY = 'anyrouter_cookie_updater_custom_providers';
+
+  function loadCustomProviders() {
+    try { return JSON.parse(GM_getValue(CUSTOM_PROVIDERS_KEY, '{}')); } catch { return {}; }
+  }
+
+  function saveCustomProviders(map) {
+    GM_setValue(CUSTOM_PROVIDERS_KEY, JSON.stringify(map));
+  }
+
+  // Build custom provider entries from the configured accounts list, merging with stored map
+  function buildProvidersMap(accounts) {
+    const stored = loadCustomProviders();
+    for (const account of (accounts || [])) {
+      if (!account.domain) continue;
+      const providerName = getProviderName(account.domain);
+      if (BUILTIN_PROVIDERS.has(providerName)) continue;
+      if (!stored[providerName]) {
+        stored[providerName] = { domain: account.domain.replace(/\/$/, '') };
+      }
+    }
+    return stored;
+  }
+
+  // Push PROVIDERS secret to GitHub
+  async function syncProvidersSecret(cfg) {
+    const accounts = cfg.accounts || [];
+    const providersMap = buildProvidersMap(accounts);
+    if (Object.keys(providersMap).length === 0) return;
+
+    saveCustomProviders(providersMap);
+
+    const secretValue = JSON.stringify(providersMap);
+    try {
+      await putSecret(cfg, 'PROVIDERS', secretValue);
+      log.success('PROVIDERS secret updated', { providers: Object.keys(providersMap) });
+    } catch (e) {
+      log.error('Failed to update PROVIDERS secret', { error: e.message });
+    }
+  }
+
   async function syncAllSites() {
     const cfg = loadConfig();
     if (!cfg.githubToken || !cfg.repoOwner || !cfg.repoName) {
@@ -290,6 +337,9 @@
       const result = await syncOneAccount(cfg, account);
       if (result.success) successCount++;
     }
+
+    // Sync custom providers so checkin.py knows how to route each site
+    await syncProvidersSecret(cfg);
 
     const summary = `${successCount}/${accounts.length} 个账号同步成功`;
     GM_setValue(LAST_SYNC_KEY, new Date().toISOString());
@@ -343,12 +393,13 @@
 
       // Always use {api_user}_{PROVIDER} format to avoid cross-platform ID collisions.
       // env_key_suffix takes priority only if explicitly set (e.g. for custom providers).
+      const providerTag = getProviderTag(domain);
+      const providerName = providerTag.toLowerCase();
       if (!env_key_suffix) {
         if (!api_user) {
           log.error(`Cannot determine secret name for ${label}: no env_key_suffix and api_user unavailable`);
           return { success: false, label, error: 'no env_key_suffix, api_user unavailable' };
         }
-        const providerTag = DOMAIN_TO_PROVIDER[domain.replace(/\/$/, '')] || 'UNKNOWN';
         env_key_suffix = `${api_user}_${providerTag}`;
         log.info(`Auto-generated env_key_suffix: ${env_key_suffix}`);
       }
@@ -356,7 +407,9 @@
       const secretName = `ANYROUTER_ACCOUNT_${env_key_suffix}`;
       const secretValue = JSON.stringify({
         cookies: { [targetCookieName]: cookieValue },
-        ...(api_user ? { api_user } : {})
+        ...(api_user ? { api_user } : {}),
+        provider: providerName,
+        domain: domain.replace(/\/$/, ''),
       });
 
       log.info(`Pushing to GitHub secret: ${secretName}`);
@@ -380,15 +433,16 @@
   //  Import from ANYROUTER_ACCOUNTS
   // ──────────────────────────────────────────────
   const PROVIDER_DOMAINS = {
-    anyrouter:   'https://anyrouter.top',
-    agentrouter: 'https://agentrouter.org',
-    freestyle:   'https://api.freestyle.cc.cd',
-    xingyungept: 'https://ai.xingyungept.cn',
-    sorai:       'https://newapi.sorai.me',
-    apikey:      'https://welfare.apikey.cc',
+    anyrouter:    'https://anyrouter.top',
+    agentrouter:  'https://agentrouter.org',
+    freestyle:    'https://api.freestyle.cc.cd',
+    xingyungept:  'https://ai.xingyungept.cn',
+    sorai:        'https://newapi.sorai.me',
+    apikey:       'https://welfare.apikey.cc',
+    computetoken: 'https://computetoken.ai',
   };
 
-  // Reverse map: domain → PROVIDER tag for secret naming
+  // Reverse map: domain → PROVIDER tag for secret naming (known sites)
   const DOMAIN_TO_PROVIDER = {
     'https://anyrouter.top':       'ANYROUTER',
     'https://agentrouter.org':     'AGENTROUTER',
@@ -396,14 +450,33 @@
     'https://ai.xingyungept.cn':   'XINGYUNGEPT',
     'https://newapi.sorai.me':     'SORAI',
     'https://welfare.apikey.cc':   'APIKEY',
+    'https://computetoken.ai':     'COMPUTETOKEN',
   };
+
+  // Derive a provider tag for any domain (known or unknown)
+  function getProviderTag(domain) {
+    const normalized = domain.replace(/\/$/, '');
+    if (DOMAIN_TO_PROVIDER[normalized]) return DOMAIN_TO_PROVIDER[normalized];
+    // Generate from hostname: "api.computetoken.ai" -> "COMPUTETOKEN"
+    const hostname = new URL(normalized).hostname;
+    const parts = hostname.split('.');
+    const skipPrefixes = new Set(['www', 'api', 'app', 'new', 'newapi', 'welfare']);
+    const meaningful = parts.find(p => !skipPrefixes.has(p)) || parts[0];
+    return meaningful.toUpperCase();
+  }
+
+  // Derive a provider name (lowercase slug) from domain for use in checkin config
+  function getProviderName(domain) {
+    return getProviderTag(domain).toLowerCase();
+  }
 
   function convertFromAnyRouterAccounts(items) {
     return items.map(item => {
       const sessionCookie = item?.cookies?.session;
       if (!sessionCookie) return null;
       const provider = item.provider || 'anyrouter';
-      const domain = PROVIDER_DOMAINS[provider] || null;
+      // Use the domain directly from the item if present, otherwise look up from known map
+      const domain = item.domain || PROVIDER_DOMAINS[provider] || null;
       if (!domain) return null;
       return { domain };
     }).filter(Boolean);

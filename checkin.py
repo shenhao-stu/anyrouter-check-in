@@ -368,6 +368,9 @@ async def main():
 		print('[FAILED] Unable to load account configuration, program exits')
 		sys.exit(1)
 
+	# Auto-register providers for any account carrying a domain field (injected by plugin)
+	app_config.auto_register_from_accounts(accounts)
+
 	print(f'[INFO] Found {len(accounts)} account configurations')
 
 	last_balance_hash = load_balance_hash()

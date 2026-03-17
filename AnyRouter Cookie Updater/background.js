@@ -87,10 +87,39 @@ async function syncAllAccounts() {
     results.push(result);
   }
 
+  // Sync custom providers so checkin.py knows how to route each site
+  await syncProvidersSecret(config, accounts);
+
   const okCount = results.filter(r => r.success).length;
   const summary = `${okCount}/${results.length} 账号同步成功`;
   await Logger.info('Sync completed', { summary });
   return { success: okCount > 0, summary, results };
+}
+
+// Build and push PROVIDERS secret for all non-builtin domains
+async function syncProvidersSecret(config, accounts) {
+  const { data: stored = {} } = await chrome.storage.local.get(['customProviders']);
+  const providersMap = stored.customProviders || {};
+
+  for (const account of (accounts || [])) {
+    if (!account.domain) continue;
+    const providerName = getProviderName(account.domain);
+    if (BUILTIN_PROVIDERS.has(providerName)) continue;
+    if (!providersMap[providerName]) {
+      providersMap[providerName] = { domain: account.domain.replace(/\/$/, '') };
+    }
+  }
+
+  if (Object.keys(providersMap).length === 0) return;
+
+  await chrome.storage.local.set({ customProviders: providersMap });
+
+  try {
+    await pushToGitHubSecret(config, 'PROVIDERS', JSON.stringify(providersMap));
+    await Logger.success('PROVIDERS secret updated', { providers: Object.keys(providersMap) });
+  } catch (e) {
+    await Logger.error('Failed to update PROVIDERS secret', { error: e.message });
+  }
 }
 
 async function fetchApiUser(domain, cookieName, cookieValue, tabId) {
@@ -182,7 +211,7 @@ async function fetchApiUser(domain, cookieName, cookieValue, tabId) {
   return null;
 }
 
-// Reverse map: domain → provider name, for auto-generating env_key_suffix
+// Reverse map: domain → provider name, for auto-generating env_key_suffix (known sites)
 const DOMAIN_TO_PROVIDER = {
   'https://anyrouter.top':       'ANYROUTER',
   'https://agentrouter.org':     'AGENTROUTER',
@@ -190,7 +219,26 @@ const DOMAIN_TO_PROVIDER = {
   'https://ai.xingyungept.cn':   'XINGYUNGEPT',
   'https://newapi.sorai.me':     'SORAI',
   'https://welfare.apikey.cc':   'APIKEY',
+  'https://computetoken.ai':     'COMPUTETOKEN',
 };
+
+// Derive a provider tag for any domain (known or unknown)
+function getProviderTag(domain) {
+  const normalized = domain.replace(/\/$/, '');
+  if (DOMAIN_TO_PROVIDER[normalized]) return DOMAIN_TO_PROVIDER[normalized];
+  const hostname = new URL(normalized).hostname;
+  const parts = hostname.split('.');
+  const skipPrefixes = new Set(['www', 'api', 'app', 'new', 'newapi', 'welfare']);
+  const meaningful = parts.find(p => !skipPrefixes.has(p)) || parts[0];
+  return meaningful.toUpperCase();
+}
+
+function getProviderName(domain) {
+  return getProviderTag(domain).toLowerCase();
+}
+
+// Known built-in providers (already hardcoded in checkin.py — excluded from PROVIDERS secret)
+const BUILTIN_PROVIDERS = new Set(['anyrouter', 'agentrouter']);
 
 // ── Permission check ─────────────────────────────────────────────────────────
 
@@ -648,12 +696,13 @@ async function syncOneAccount(config, account) {
     }
 
     // Determine secret suffix
+    const providerTag = getProviderTag(domain);
+    const providerName = providerTag.toLowerCase();
     if (!env_key_suffix) {
       if (!api_user) {
         await Logger.error(`Cannot determine secret name for ${label}: no env_key_suffix and api_user unavailable`);
         return { success: false, label, error: 'cannot determine secret name (no env_key_suffix, api_user unavailable)' };
       }
-      const providerTag = DOMAIN_TO_PROVIDER[domain.replace(/\/$/, '')] || 'UNKNOWN';
       env_key_suffix = `${api_user}_${providerTag}`;
       await Logger.info(`Auto-generated env_key_suffix: ${env_key_suffix}`);
     }
@@ -661,7 +710,9 @@ async function syncOneAccount(config, account) {
     const secretName = `ANYROUTER_ACCOUNT_${env_key_suffix}`;
     const secretValue = JSON.stringify({
       cookies: { [targetCookieName]: cookieValue },
-      ...(api_user ? { api_user } : {})
+      ...(api_user ? { api_user } : {}),
+      provider: providerName,
+      domain: domain.replace(/\/$/, ''),
     });
 
     await Logger.info(`Pushing to GitHub secret: ${secretName}`);

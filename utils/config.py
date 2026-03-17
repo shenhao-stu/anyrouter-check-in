@@ -132,6 +132,29 @@ class AppConfig:
 		"""获取指定 provider 配置"""
 		return self.providers.get(name)
 
+	def auto_register_from_accounts(self, accounts: list) -> None:
+		"""Auto-register providers from account configs that carry domain information.
+
+		When the plugin pushes ANYROUTER_ACCOUNT_* secrets it now includes a
+		``provider`` and ``domain`` field.  For platforms not already in the
+		built-in or PROVIDERS-env-supplied list we create a minimal ProviderConfig
+		on the fly so checkin.py can route requests to the right host.
+		"""
+		for acct in accounts:
+			provider_name = acct.provider
+			if provider_name in self.providers:
+				continue
+			# AccountConfig carries domain only when injected by the plugin
+			domain = getattr(acct, 'domain', None)
+			if not domain:
+				print(f'[WARNING] Provider "{provider_name}" not found and no domain in account config; skipping')
+				continue
+			try:
+				self.providers[provider_name] = ProviderConfig.from_dict(provider_name, {'domain': domain})
+				print(f'[INFO] Auto-registered provider "{provider_name}" with domain "{domain}"')
+			except Exception as e:
+				print(f'[WARNING] Failed to auto-register provider "{provider_name}": {e}')
+
 
 @dataclass
 class AccountConfig:
@@ -141,14 +164,22 @@ class AccountConfig:
 	api_user: str
 	provider: str = 'anyrouter'
 	name: str | None = None
+	domain: str | None = None  # optional: injected by plugin for unknown providers
 
 	@classmethod
 	def from_dict(cls, data: dict, index: int) -> 'AccountConfig':
 		"""从字典创建 AccountConfig"""
 		provider = data.get('provider', 'anyrouter')
 		name = data.get('name', f'Account {index + 1}')
+		domain = data.get('domain') or None
 
-		return cls(cookies=data['cookies'], api_user=data['api_user'], provider=provider, name=name if name else None)
+		return cls(
+			cookies=data['cookies'],
+			api_user=data['api_user'],
+			provider=provider,
+			name=name if name else None,
+			domain=domain,
+		)
 
 	def get_display_name(self, index: int) -> str:
 		"""获取显示名称"""
@@ -277,14 +308,17 @@ def load_accounts_config() -> list[AccountConfig] | None:
 			return None
 		accounts.append(AccountConfig.from_dict(account_dict, i))
 
-	seen_api_users = set()
+	# Use (api_user, provider) as the dedup key so the same user ID on different
+	# platforms is not incorrectly collapsed into one account.
+	seen_keys: set[tuple[str, str]] = set()
 	unique_accounts = []
 	for acct in accounts:
-		if acct.api_user not in seen_api_users:
-			seen_api_users.add(acct.api_user)
+		key = (acct.api_user, acct.provider)
+		if key not in seen_keys:
+			seen_keys.add(key)
 			unique_accounts.append(acct)
 		else:
-			print(f'[WARNING] Duplicate api_user "{acct.api_user}" detected, keeping first occurrence')
+			print(f'[WARNING] Duplicate (api_user, provider) "{acct.api_user}/{acct.provider}" detected, keeping first occurrence')
 
 	print(f'[INFO] Loaded {len(unique_accounts)} account(s) total')
 	return unique_accounts
