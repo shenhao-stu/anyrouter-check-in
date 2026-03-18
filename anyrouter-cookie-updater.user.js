@@ -274,7 +274,7 @@
   // ──────────────────────────────────────────────
   //  Known built-in providers (excluded from PROVIDERS secret — already hardcoded in checkin.py)
   // ──────────────────────────────────────────────
-  const BUILTIN_PROVIDERS = new Set(['anyrouter', 'agentrouter', 'freestyle', 'xingyungept', 'sorai', 'apikey']);
+  const BUILTIN_PROVIDERS = new Set(['anyrouter', 'agentrouter']);
 
   // Key for storing locally-tracked custom providers (provider_name -> domain)
   const CUSTOM_PROVIDERS_KEY = 'anyrouter_cookie_updater_custom_providers';

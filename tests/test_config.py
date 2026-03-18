@@ -8,15 +8,19 @@ sys.path.insert(0, str(project_root))
 from utils.config import AccountConfig, AppConfig
 
 
-def test_builtin_providers_include_extension_known_providers(monkeypatch):
+def test_builtin_providers_only_include_runtime_defaults(monkeypatch):
 	monkeypatch.delenv('PROVIDERS', raising=False)
 
 	config = AppConfig.load_from_env()
 
-	assert {'anyrouter', 'agentrouter', 'freestyle', 'xingyungept', 'sorai', 'apikey'} <= set(config.providers)
+	assert {'anyrouter', 'agentrouter'} <= set(config.providers)
+	assert 'freestyle' not in config.providers
+	assert 'xingyungept' not in config.providers
+	assert 'sorai' not in config.providers
+	assert 'apikey' not in config.providers
 
 
-def test_providers_env_can_override_builtin_provider(monkeypatch):
+def test_providers_env_can_add_extra_provider(monkeypatch):
 	monkeypatch.setenv(
 		'PROVIDERS',
 		json.dumps({'apikey': {'domain': 'https://custom.apikey.example', 'sign_in_path': '/custom/signin'}}),

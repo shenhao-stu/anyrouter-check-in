@@ -238,7 +238,7 @@ function getProviderName(domain) {
 }
 
 // Known built-in providers (already hardcoded in checkin.py — excluded from PROVIDERS secret)
-const BUILTIN_PROVIDERS = new Set(['anyrouter', 'agentrouter', 'freestyle', 'xingyungept', 'sorai', 'apikey']);
+const BUILTIN_PROVIDERS = new Set(['anyrouter', 'agentrouter']);
 
 // ── Permission check ─────────────────────────────────────────────────────────
 
