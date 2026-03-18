@@ -98,8 +98,10 @@ async function syncAllAccounts() {
 
 // Build and push PROVIDERS secret for all non-builtin domains
 async function syncProvidersSecret(config, accounts) {
-  const { data: stored = {} } = await chrome.storage.local.get(['customProviders']);
-  const providersMap = stored.customProviders || {};
+  const { customProviders: stored = {} } = await chrome.storage.local.get(['customProviders']);
+  const providersMap = Object.fromEntries(
+    Object.entries(stored).filter(([providerName]) => !BUILTIN_PROVIDERS.has(providerName))
+  );
 
   for (const account of (accounts || [])) {
     if (!account.domain) continue;
@@ -109,8 +111,6 @@ async function syncProvidersSecret(config, accounts) {
       providersMap[providerName] = { domain: account.domain.replace(/\/$/, '') };
     }
   }
-
-  if (Object.keys(providersMap).length === 0) return;
 
   await chrome.storage.local.set({ customProviders: providersMap });
 
@@ -238,7 +238,7 @@ function getProviderName(domain) {
 }
 
 // Known built-in providers (already hardcoded in checkin.py — excluded from PROVIDERS secret)
-const BUILTIN_PROVIDERS = new Set(['anyrouter', 'agentrouter']);
+const BUILTIN_PROVIDERS = new Set(['anyrouter', 'agentrouter', 'freestyle', 'xingyungept', 'sorai', 'apikey']);
 
 // ── Permission check ─────────────────────────────────────────────────────────
 
@@ -571,7 +571,7 @@ async function diagnoseCookieAccess(url, hostname) {
 
 async function syncOneAccount(config, account) {
   const { domain, cookie_name } = account;
-  let { env_key_suffix } = account;
+  let { api_user, env_key_suffix } = account;
   const targetCookieName = cookie_name || 'session';
   const label = env_key_suffix || domain;
   let tab = null;
@@ -684,8 +684,10 @@ async function syncOneAccount(config, account) {
     const cookieValue = cookie.value;
     await Logger.success(`Cookie extracted for ${label}`, { length: cookieValue.length });
 
-    await Logger.info(`Fetching api_user from /api/user/self for ${label}...`);
-    const api_user = await fetchApiUser(domain, targetCookieName, cookieValue, tab?.id);
+    if (!api_user) {
+      await Logger.info(`Fetching api_user from /api/user/self for ${label}...`);
+      api_user = await fetchApiUser(domain, targetCookieName, cookieValue, tab?.id);
+    }
 
     // Close the background tab after fetchApiUser is done (it may need the tab)
     if (tab) { await closeTab(tab); tab = null; }
@@ -707,10 +709,15 @@ async function syncOneAccount(config, account) {
       await Logger.info(`Auto-generated env_key_suffix: ${env_key_suffix}`);
     }
 
+    if (!api_user) {
+      await Logger.error(`Skipping ${label}: api_user unavailable, refusing to push incomplete secret`);
+      return { success: false, label, error: 'api_user unavailable' };
+    }
+
     const secretName = `ANYROUTER_ACCOUNT_${env_key_suffix}`;
     const secretValue = JSON.stringify({
       cookies: { [targetCookieName]: cookieValue },
-      ...(api_user ? { api_user } : {}),
+      api_user,
       provider: providerName,
       domain: domain.replace(/\/$/, ''),
     });

@@ -330,18 +330,18 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 	provider_config = app_config.get_provider(account.provider)
 	if not provider_config:
 		print(f'[FAILED] {account_name}: Provider "{account.provider}" not found in configuration')
-		return False, None
+		return False, None, None
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
 
 	user_cookies = parse_cookies(account.cookies)
 	if not user_cookies:
 		print(f'[FAILED] {account_name}: Invalid configuration format')
-		return False, None
+		return False, None, None
 
 	all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
 	if not all_cookies:
-		return False, None
+		return False, None, None
 
 	client = httpx.Client(http2=True, timeout=30.0)
 

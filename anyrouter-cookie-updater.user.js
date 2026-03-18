@@ -274,7 +274,7 @@
   // ──────────────────────────────────────────────
   //  Known built-in providers (excluded from PROVIDERS secret — already hardcoded in checkin.py)
   // ──────────────────────────────────────────────
-  const BUILTIN_PROVIDERS = new Set(['anyrouter', 'agentrouter']);
+  const BUILTIN_PROVIDERS = new Set(['anyrouter', 'agentrouter', 'freestyle', 'xingyungept', 'sorai', 'apikey']);
 
   // Key for storing locally-tracked custom providers (provider_name -> domain)
   const CUSTOM_PROVIDERS_KEY = 'anyrouter_cookie_updater_custom_providers';
@@ -289,7 +289,9 @@
 
   // Build custom provider entries from the configured accounts list, merging with stored map
   function buildProvidersMap(accounts) {
-    const stored = loadCustomProviders();
+    const stored = Object.fromEntries(
+      Object.entries(loadCustomProviders()).filter(([providerName]) => !BUILTIN_PROVIDERS.has(providerName))
+    );
     for (const account of (accounts || [])) {
       if (!account.domain) continue;
       const providerName = getProviderName(account.domain);
@@ -305,7 +307,6 @@
   async function syncProvidersSecret(cfg) {
     const accounts = cfg.accounts || [];
     const providersMap = buildProvidersMap(accounts);
-    if (Object.keys(providersMap).length === 0) return;
 
     saveCustomProviders(providersMap);
 
@@ -350,7 +351,7 @@
 
   async function syncOneAccount(cfg, account) {
     const { domain, cookie_name } = account;
-    let { env_key_suffix } = account;
+    let { api_user, env_key_suffix } = account;
     const targetCookieName = cookie_name || 'session';
     const label = env_key_suffix || domain;
 
@@ -386,8 +387,10 @@
       }
       log.success(`Cookie extracted for ${label}`, { length: cookieValue.length });
 
-      log.info(`Fetching api_user from /api/user/self for ${label}`);
-      const api_user = await fetchApiUser(domain, targetCookieName, cookieValue);
+      if (!api_user) {
+        log.info(`Fetching api_user from /api/user/self for ${label}`);
+        api_user = await fetchApiUser(domain, targetCookieName, cookieValue);
+      }
       if (api_user) log.success(`Resolved api_user: ${api_user}`);
       else log.error(`Could not resolve api_user for ${label}`);
 
@@ -404,10 +407,15 @@
         log.info(`Auto-generated env_key_suffix: ${env_key_suffix}`);
       }
 
+      if (!api_user) {
+        log.error(`Skipping ${label}: api_user unavailable, refusing to push incomplete secret`);
+        return { success: false, label, error: 'api_user unavailable' };
+      }
+
       const secretName = `ANYROUTER_ACCOUNT_${env_key_suffix}`;
       const secretValue = JSON.stringify({
         cookies: { [targetCookieName]: cookieValue },
-        ...(api_user ? { api_user } : {}),
+        api_user,
         provider: providerName,
         domain: domain.replace(/\/$/, ''),
       });

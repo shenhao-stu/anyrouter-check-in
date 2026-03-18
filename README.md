@@ -5,7 +5,7 @@
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/github/license/millylee/anyrouter-check-in)](LICENSE)
 
-多平台多账号自动签到，理论上支持所有 NewAPI / OneAPI 平台，内置支持 AnyRouter、AgentRouter，其它平台通过插件一键注册，无需手动修改 GitHub Secrets。
+多平台多账号自动签到，理论上支持所有 NewAPI / OneAPI 平台，内置支持 AnyRouter、AgentRouter、Freestyle、XingyunGEPT、Sorai、APIKey，其它未知平台通过插件一键注册，无需手动修改 GitHub Secrets。
 
 **配合 [Chrome 扩展 / 油猴脚本](#chrome-扩展anyrouter-cookie-updater) 食用效果更好** — 自动从浏览器提取 session cookie 并推送到 GitHub Secrets，同时**自动注册新平台**，cookie 过期或新增平台时无需手动编辑任何环境变量。
 
@@ -115,7 +115,7 @@
 | `provider` | 可选 | 服务商标识，默认 `anyrouter` |
 | `name` | 可选 | 账号显示名称，用于日志和通知 |
 
-> `anyrouter` 和 `agentrouter` 已内置配置，其余平台通过 `PROVIDERS` secret 或插件自动注册。
+> `anyrouter`、`agentrouter`、`freestyle`、`xingyungept`、`sorai`、`apikey` 已内置配置；其它平台可通过 `PROVIDERS` secret 或插件自动注册。
 
 ### 获取 cookies 和 api_user
 
@@ -255,7 +255,11 @@ ANYROUTER_ACCOUNT_883_COMPUTETOKEN
 | 平台 | WAF | 签到路径 |
 | --- | --- | --- |
 | `anyrouter` | waf_cookies | `/api/user/sign_in` |
-| `agentrouter` | 无 | 访问用户信息时自动签到 |
+| `agentrouter` | waf_cookies | 访问用户信息时自动签到 |
+| `freestyle` | 无 | `/api/user/sign_in`（404 时自动回退到 `/api/user/checkin`） |
+| `xingyungept` | 无 | `/api/user/sign_in`（404 时自动回退到 `/api/user/checkin`） |
+| `sorai` | 无 | `/api/user/sign_in`（404 时自动回退到 `/api/user/checkin`） |
+| `apikey` | 无 | `/api/user/sign_in`（404 时自动回退到 `/api/user/checkin`） |
 
 ---
 
