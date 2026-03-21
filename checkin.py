@@ -131,6 +131,12 @@ async def get_waf_cookies_with_playwright(account_name: str, login_url: str, req
 				return None
 
 
+def _is_cloudflare_response(response) -> bool:
+	"""检测响应是否来自 Cloudflare WAF"""
+	server = response.headers.get('server', '').lower()
+	return 'cloudflare' in server or 'cf-ray' in response.headers
+
+
 def get_user_info(client, headers, user_info_url: str):
 	"""获取用户信息"""
 	try:
@@ -148,7 +154,10 @@ def get_user_info(client, headers, user_info_url: str):
 					'used_quota': used_quota,
 					'display': f'💰 Current balance: ${quota}, Used: ${used_quota}',
 				}
-			return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
+		# 检测 Cloudflare 拦截（TLS 指纹不匹配导致 httpx 被 403）
+		if response.status_code == 403 and _is_cloudflare_response(response):
+			return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}', 'cloudflare': True}
+		return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
 	except Exception as e:
 		return {'success': False, 'error': f'Failed to get user info: {str(e)[:50]}...'}
 
@@ -544,6 +553,11 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			if user_info_before and user_info_before.get('success'):
 				print(user_info_before['display'])
 				break
+			# 自动检测 Cloudflare：httpx 的 TLS 指纹被 CF 拒绝，回退到 Playwright 浏览器
+			if user_info_before and user_info_before.get('cloudflare'):
+				print(f'[INFO] {account_name}: Cloudflare WAF detected, switching to Playwright browser')
+				client.close()
+				return await check_in_with_playwright(account, account_name, provider_config)
 			if attempt < MAX_RETRIES:
 				print(f'[RETRY] {account_name}: Failed to get user info, retrying in {RETRY_DELAY}s ({attempt}/{MAX_RETRIES})')
 				time.sleep(RETRY_DELAY)
