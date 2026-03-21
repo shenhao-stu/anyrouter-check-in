@@ -147,6 +147,8 @@ def get_user_info(client, headers, user_info_url: str):
 					'used_quota': used_quota,
 					'display': f'💰 Current balance: ${quota}, Used: ${used_quota}',
 				}
+		body_preview = response.text[:200] if response.text else '(empty)'
+		print(f'[DEBUG] Response body preview: {body_preview}')
 		return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
 	except Exception as e:
 		return {'success': False, 'error': f'Failed to get user info: {str(e)[:50]}...'}
@@ -240,7 +242,9 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 				time.sleep(RETRY_DELAY)
 				continue
 
+			body_preview = response.text[:200] if response.text else '(empty)'
 			print(f'[FAILED] {account_name}: Check-in failed - HTTP {response.status_code}')
+			print(f'[DEBUG] {account_name}: Response body: {body_preview}')
 			return False
 
 		except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, OSError) as e:
