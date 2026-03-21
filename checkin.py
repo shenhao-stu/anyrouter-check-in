@@ -14,6 +14,7 @@ from datetime import datetime
 import httpx
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
+from urllib.parse import urlparse
 
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.notify import notify
@@ -147,9 +148,7 @@ def get_user_info(client, headers, user_info_url: str):
 					'used_quota': used_quota,
 					'display': f'💰 Current balance: ${quota}, Used: ${used_quota}',
 				}
-		body_preview = response.text[:200] if response.text else '(empty)'
-		print(f'[DEBUG] Response body preview: {body_preview}')
-		return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
+			return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
 	except Exception as e:
 		return {'success': False, 'error': f'Failed to get user info: {str(e)[:50]}...'}
 
@@ -242,9 +241,7 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 				time.sleep(RETRY_DELAY)
 				continue
 
-			body_preview = response.text[:200] if response.text else '(empty)'
 			print(f'[FAILED] {account_name}: Check-in failed - HTTP {response.status_code}')
-			print(f'[DEBUG] {account_name}: Response body: {body_preview}')
 			return False
 
 		except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, OSError) as e:
@@ -326,6 +323,174 @@ def format_check_in_notification(detail: dict) -> str:
 	return '\n'.join(lines)
 
 
+PLAYWRIGHT_BROWSER_ARGS = [
+	'--disable-blink-features=AutomationControlled',
+	'--disable-dev-shm-usage',
+	'--disable-web-security',
+	'--disable-features=VizDisplayCompositor',
+	'--no-sandbox',
+]
+
+PLAYWRIGHT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+
+
+def _parse_user_info_json(data: dict) -> dict:
+	"""解析 /api/user/self 响应 JSON"""
+	if data.get('success'):
+		user_data = data.get('data', {})
+		quota = round(user_data.get('quota', 0) / 500000, 2)
+		used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
+		return {
+			'success': True,
+			'quota': quota,
+			'used_quota': used_quota,
+			'display': f'💰 Current balance: ${quota}, Used: ${used_quota}',
+		}
+	return {'success': False, 'error': f'API returned success=false'}
+
+
+async def check_in_with_playwright(
+	account: AccountConfig, account_name: str, provider_config,
+):
+	"""通过 Playwright 浏览器内 fetch 执行签到（绕过 Cloudflare TLS 指纹校验）"""
+	user_cookies = parse_cookies(account.cookies)
+	if not user_cookies:
+		print(f'[FAILED] {account_name}: Invalid configuration format')
+		return False, None, None
+
+	print(f'[INFO] {account_name}: Using Playwright browser for API calls (Cloudflare bypass)')
+
+	async with async_playwright() as p:
+		import tempfile
+
+		with tempfile.TemporaryDirectory() as temp_dir:
+			context = await p.chromium.launch_persistent_context(
+				user_data_dir=temp_dir,
+				headless=False,
+				user_agent=PLAYWRIGHT_USER_AGENT,
+				viewport={'width': 1920, 'height': 1080},
+				args=PLAYWRIGHT_BROWSER_ARGS,
+			)
+
+			try:
+				# 注入 session cookie
+				hostname = urlparse(provider_config.domain).hostname
+				for name, value in user_cookies.items():
+					await context.add_cookies([{
+						'name': name,
+						'value': value,
+						'domain': hostname,
+						'path': '/',
+					}])
+
+				page = await context.new_page()
+
+				# 导航到站点，通过 Cloudflare challenge
+				print(f'[PROCESSING] {account_name}: Navigating to pass Cloudflare challenge...')
+				await page.goto(f'{provider_config.domain}/', wait_until='networkidle')
+				try:
+					await page.wait_for_function('document.readyState === "complete"', timeout=10000)
+				except Exception:
+					await page.wait_for_timeout(5000)
+
+				# 使用浏览器内 fetch 调用 API（共享 Chrome TLS 指纹）
+				api_user_key = provider_config.api_user_key
+				api_user = account.api_user
+
+				# 获取签到前用户信息
+				user_info_before = None
+				for attempt in range(1, MAX_RETRIES + 1):
+					result = await page.evaluate(
+						'''async ([path, key, user]) => {
+							try {
+								const r = await fetch(path, {headers: {[key]: user}});
+								if (!r.ok) return {success: false, error: 'HTTP ' + r.status};
+								return await r.json();
+							} catch(e) { return {success: false, error: e.message}; }
+						}''',
+						[provider_config.user_info_path, api_user_key, api_user],
+					)
+					parsed = _parse_user_info_json(result) if result.get('success') else result
+					if parsed.get('success'):
+						user_info_before = parsed
+						print(user_info_before['display'])
+						break
+					if attempt < MAX_RETRIES:
+						print(f'[RETRY] {account_name}: Failed to get user info, retrying in {RETRY_DELAY}s ({attempt}/{MAX_RETRIES})')
+						await page.wait_for_timeout(RETRY_DELAY * 1000)
+					else:
+						user_info_before = parsed
+						print(parsed.get('error', 'Unknown error'))
+
+				# 执行签到
+				success = False
+				if provider_config.needs_manual_check_in():
+					sign_in_path = provider_config.sign_in_path
+					print(f'[NETWORK] {account_name}: Executing check-in via browser fetch')
+					checkin_result = await page.evaluate(
+						'''async ([path, fallbackPath, key, user]) => {
+							const headers = {
+								'Content-Type': 'application/json',
+								'X-Requested-With': 'XMLHttpRequest',
+								[key]: user
+							};
+							try {
+								let r = await fetch(path, {method: 'POST', headers});
+								if (r.status === 404 && path !== fallbackPath) {
+									r = await fetch(fallbackPath, {method: 'POST', headers});
+								}
+								const status = r.status;
+								let body;
+								try { body = await r.json(); } catch(e) { body = {_raw: await r.text()}; }
+								return {status, body};
+							} catch(e) { return {status: 0, body: {error: e.message}}; }
+						}''',
+						[sign_in_path, NEW_API_CHECKIN_PATH, api_user_key, api_user],
+					)
+					status = checkin_result.get('status', 0)
+					body = checkin_result.get('body', {})
+					print(f'[RESPONSE] {account_name}: Response status code {status}')
+
+					if status == 200:
+						if body.get('ret') == 1 or body.get('code') == 0 or body.get('success'):
+							print(f'[SUCCESS] {account_name}: Check-in successful!')
+							success = True
+						else:
+							error_msg = body.get('msg', body.get('message', 'Unknown error'))
+							already_checked_keywords = ['已经签到', '已签到', '重复签到', 'already checked', 'already signed']
+							if any(kw in str(error_msg).lower() for kw in already_checked_keywords):
+								print(f'[SUCCESS] {account_name}: Already checked in today')
+								success = True
+							else:
+								print(f'[FAILED] {account_name}: Check-in failed - {error_msg}')
+					else:
+						print(f'[FAILED] {account_name}: Check-in failed - HTTP {status}')
+				else:
+					print(f'[INFO] {account_name}: Check-in completed automatically (triggered by user info request)')
+					success = True
+
+				# 获取签到后用户信息
+				result_after = await page.evaluate(
+					'''async ([path, key, user]) => {
+						try {
+							const r = await fetch(path, {headers: {[key]: user}});
+							if (!r.ok) return {success: false, error: 'HTTP ' + r.status};
+							return await r.json();
+						} catch(e) { return {success: false, error: e.message}; }
+					}''',
+					[provider_config.user_info_path, api_user_key, api_user],
+				)
+				user_info_after = _parse_user_info_json(result_after) if result_after.get('success') else result_after
+
+				await context.close()
+				return success, user_info_before, user_info_after
+
+			except Exception as e:
+				print(f'[FAILED] {account_name}: Playwright check-in error - {str(e)[:100]}')
+				await context.close()
+				return False, None, None
+
+
 async def check_in_account(account: AccountConfig, account_index: int, app_config: AppConfig):
 	"""为单个账号执行签到操作"""
 	account_name = account.get_display_name(account_index)
@@ -337,6 +502,10 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		return False, None, None
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
+
+	# Cloudflare 防护站点：通过 Playwright 浏览器内 fetch 执行所有请求
+	if provider_config.needs_playwright():
+		return await check_in_with_playwright(account, account_name, provider_config)
 
 	user_cookies = parse_cookies(account.cookies)
 	if not user_cookies:

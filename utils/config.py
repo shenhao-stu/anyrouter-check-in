@@ -19,7 +19,7 @@ class ProviderConfig:
 	sign_in_path: str | None = '/api/user/sign_in'
 	user_info_path: str = '/api/user/self'
 	api_user_key: str = 'new-api-user'
-	bypass_method: Literal['waf_cookies'] | None = None
+	bypass_method: Literal['waf_cookies', 'playwright'] | None = None
 	waf_cookie_names: List[str] | None = None
 
 	def __post_init__(self):
@@ -35,7 +35,7 @@ class ProviderConfig:
 
 				required_waf_cookies.add(name)
 
-		if not required_waf_cookies:
+		if not required_waf_cookies and self.bypass_method == 'waf_cookies':
 			self.bypass_method = None
 
 		self.waf_cookie_names = list(required_waf_cookies)
@@ -62,6 +62,10 @@ class ProviderConfig:
 	def needs_waf_cookies(self) -> bool:
 		"""判断是否需要获取 WAF cookies"""
 		return self.bypass_method == 'waf_cookies'
+
+	def needs_playwright(self) -> bool:
+		"""判断是否需要通过 Playwright 浏览器发起所有请求（Cloudflare TLS 指纹校验）"""
+		return self.bypass_method == 'playwright'
 
 	def needs_manual_check_in(self) -> bool:
 		"""判断是否需要手动调用签到接口"""
