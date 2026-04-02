@@ -777,34 +777,31 @@ def _solve_turnstile_dp(tab, account_name: str) -> bool:
 			except Exception:
 				pass
 
-		# Strategy 2: Shadow DOM traversal — find iframe and click
+		# Strategy 2: Shadow DOM traversal — find iframe and click via coordinates
 		if attempt in (2, 8, 15):
 			try:
-				resp_input = tab.ele('@name=cf-turnstile-response', timeout=2)
-				if resp_input:
-					wrapper = resp_input.parent()
-					if wrapper and wrapper.shadow_root:
-						iframe_el = wrapper.shadow_root.ele('tag:iframe', timeout=2)
-						if iframe_el:
-							print(f'[INFO] {account_name}: Found Turnstile iframe in shadow DOM, clicking...')
-							iframe_el.click()
-							time.sleep(3)
-							continue
-						# Try deeper: iframe → body → shadowRoot → input
-						try:
-							iframe_body = iframe_el.ele('tag:body', timeout=2)
-							if iframe_body and iframe_body.shadow_root:
-								inner_input = iframe_body.shadow_root.ele('tag:input', timeout=2)
-								if inner_input:
-									inner_input.click()
-									print(f'[INFO] {account_name}: Clicked inner shadow DOM input')
-									time.sleep(3)
-									continue
-						except Exception:
-							pass
+				# Use JS to get iframe bounding box from shadow DOM (DrissionPage can't click ChromiumFrame directly)
+				iframe_box = tab.run_js('''
+					const resp = document.querySelector('input[name="cf-turnstile-response"]');
+					if (!resp) return null;
+					const wrapper = resp.parentElement;
+					if (!wrapper || !wrapper.shadowRoot) return null;
+					const iframe = wrapper.shadowRoot.querySelector('iframe');
+					if (!iframe) return null;
+					const rect = iframe.getBoundingClientRect();
+					if (rect.width <= 0 || rect.height <= 0) return null;
+					return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+				''')
+				if iframe_box:
+					cx = int(iframe_box['x'] + iframe_box['width'] / 2)
+					cy = int(iframe_box['y'] + iframe_box['height'] / 2)
+					print(f'[INFO] {account_name}: Found Turnstile iframe in shadow DOM ({iframe_box["width"]:.0f}x{iframe_box["height"]:.0f}), clicking ({cx},{cy})...')
+					tab.actions.click(cx, cy)
+					time.sleep(3)
+					continue
 			except Exception as e:
 				if attempt < 5:
-					print(f'[INFO] {account_name}: Shadow DOM traversal: {str(e)[:60]}')
+					print(f'[INFO] {account_name}: Shadow DOM click: {str(e)[:60]}')
 
 		# Retry turnstile.execute() periodically
 		if attempt in (5, 10, 15, 20, 25):
