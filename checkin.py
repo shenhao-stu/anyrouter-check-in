@@ -596,6 +596,22 @@ async def _solve_turnstile(page, account_name: str) -> bool:
 		except Exception:
 			pass
 
+		# Strategy 1: Use Turnstile JS API to trigger and wait for resolution
+		if attempt == 0:
+			try:
+				await page.evaluate("""() => {
+					try { turnstile.reset(); } catch(e) {}
+					try { turnstile.execute(); } catch(e) {}
+					// Also try to render if there's a container
+					try {
+						const container = document.querySelector('input[name="cf-turnstile-response"]')?.parentElement;
+						if (container) turnstile.render(container);
+					} catch(e) {}
+				}""")
+				print(f'[INFO] {account_name}: Called turnstile.reset()/execute()/render()')
+			except Exception:
+				pass
+
 		# Strategy 1: Shadow DOM traversal — find iframe inside wrapper's shadowRoot
 		try:
 			iframe_box = await page.evaluate("""() => {
@@ -685,15 +701,14 @@ async def _solve_turnstile(page, account_name: str) -> bool:
 				pass
 			break  # Only process first matching frame
 
-		# On first attempt, try turnstile.reset() to trigger fresh challenge
-		if attempt == 3:
+		# Retry turnstile.execute() periodically
+		if attempt in (5, 10, 15):
 			try:
-				await page.evaluate('try { turnstile.reset() } catch(e) {}')
-				print(f'[INFO] {account_name}: Called turnstile.reset()')
+				await page.evaluate('try { turnstile.execute() } catch(e) {}')
 			except Exception:
 				pass
 
-		await page.wait_for_timeout(1000)
+		await page.wait_for_timeout(1500)
 
 	print(f'[FAILED] {account_name}: Turnstile not solved after 20 attempts')
 	return False
