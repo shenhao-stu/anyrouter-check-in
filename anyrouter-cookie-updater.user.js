@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AnyRouter Cookie Updater
 // @namespace    https://github.com/shenhao-stu/anyrouter-check-in
-// @version      1.0.0
+// @version      1.1.0
 // @description  自动提取已登录 AnyRouter 等 NewAPI/OneAPI 平台的 session cookie，推送到 GitHub Actions Environment Secrets（ANYROUTER_ACCOUNT_* 格式），配合签到脚本实现 cookie 自动续期。
 // @author       shenhao-stu
 // @license      MIT
@@ -350,16 +350,32 @@
     return { success: successCount > 0, summary };
   }
 
-  async function syncOneAccount(cfg, account) {
+  async function testOneAccount(account) {
+    if (!account || !account.domain) {
+      return { success: false, error: '缺少 domain' };
+    }
+    const result = await syncOneAccount(null, account, { dryRun: true });
+    if (!result.success) return result;
+
+    const parts = [`cookie=${result.cookieName || 'session'}`];
+    if (result.api_user) parts.push(`api_user=${result.api_user}`);
+    if (result.provider) parts.push(`provider=${result.provider}`);
+    const partial = !result.api_user;
+
+    return { success: true, summary: parts.join(' · '), partial, result };
+  }
+
+  async function syncOneAccount(cfg, account, options = {}) {
     const { domain, cookie_name } = account;
     let { api_user, env_key_suffix } = account;
     const targetCookieName = cookie_name || 'session';
     const label = env_key_suffix || domain;
+    const { dryRun = false } = options;
 
     try {
       // Special handling: heibai multi-cookie provider
       if (isHeibaiProvider(domain)) {
-        return await syncHeibaiAccount(cfg, account);
+        return await syncHeibaiAccount(cfg, account, options);
       }
 
       log.info(`Extracting cookie "${targetCookieName}" for ${label}`, {
@@ -404,6 +420,12 @@
       // env_key_suffix takes priority only if explicitly set (e.g. for custom providers).
       const providerTag = getProviderTag(domain);
       const providerName = providerTag.toLowerCase();
+
+      if (dryRun) {
+        log.success(`Test passed for ${label}`, { cookie_name: targetCookieName, api_user: api_user || null, provider: providerName });
+        return { success: true, label, api_user, provider: providerName, cookieName: targetCookieName };
+      }
+
       if (!env_key_suffix) {
         if (!api_user) {
           log.error(`Cannot determine secret name for ${label}: no env_key_suffix and api_user unavailable`);
@@ -513,9 +535,10 @@
     });
   }
 
-  async function syncHeibaiAccount(cfg, account) {
+  async function syncHeibaiAccount(cfg, account, options = {}) {
     const { domain } = account;
     const label = account.env_key_suffix || domain;
+    const { dryRun = false } = options;
 
     try {
       log.info(`Heibai: extracting cookies for ${label}`);
@@ -538,6 +561,11 @@
         return { success: false, label, error: 'cannot resolve user identity' };
       }
       log.success(`Heibai: resolved user: ${userId}`);
+
+      if (dryRun) {
+        log.success(`Heibai: test passed for ${label}`, { provider: 'heibai', userId });
+        return { success: true, label, provider: 'heibai', cookieName: '(multi-cookie)', api_user: userId };
+      }
 
       let { env_key_suffix } = account;
       if (!env_key_suffix) {
@@ -724,8 +752,38 @@
     .arc-tab.active { background: #0969da; color: #fff; }
     .arc-account-list { display: flex; flex-direction: column; gap: 7px; }
     .arc-item { border: 1px solid #d0d7de; border-radius: 5px; padding: 9px; background: #fff; }
-    .arc-item-hdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
-    .arc-item-lbl { font-size: 11px; font-weight: 600; color: #57606a; }
+    .arc-item-hdr { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .arc-item-title { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+    .arc-item-toggle {
+      width: 22px; height: 22px; border: 1px solid #d0d7de; background: #fff; cursor: pointer; color: #57606a;
+      font-size: 11px; line-height: 1; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 5px;
+      flex: 0 0 auto;
+    }
+    .arc-item-toggle:hover { background: #eaeef2; }
+    .arc-item.collapsed .arc-item-toggle { transform: rotate(-90deg); }
+    .arc-item-lbl { font-size: 11px; font-weight: 600; color: #57606a; white-space: nowrap; }
+    .arc-item-summary {
+      font-size: 10px; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .arc-item-actions { display: flex; align-items: center; gap: 6px; }
+    .arc-item-test {
+      padding: 3px 8px; border: 1px solid #d0d7de; background: #fff; cursor: pointer; color: #0969da;
+      font-size: 11px; line-height: 1.4; border-radius: 5px;
+    }
+    .arc-item-test:hover { background: #ddf4ff; border-color: #0969da; }
+    .arc-item-test.is-loading { background: #ddf4ff; color: #0969da; border-color: #0969da; cursor: not-allowed; }
+    .arc-item-test.is-success { background: #2da44e; color: #fff; border-color: #2da44e; }
+    .arc-item-test.is-success:hover { background: #218838; border-color: #218838; }
+    .arc-item-test.is-error { background: #cf222e; color: #fff; border-color: #cf222e; }
+    .arc-item-test.is-error:hover { background: #a40e26; border-color: #a40e26; }
+    .arc-item-body { margin-top: 7px; }
+    .arc-item.collapsed .arc-item-body { display: none; }
+    .arc-item-status {
+      margin-top: 8px; padding: 6px 8px; border-radius: 5px; font-size: 11px; display: none; line-height: 1.4;
+    }
+    .arc-item-status.ok { background: #dafbe1; color: #116329; border: 1px solid #aceebb; }
+    .arc-item-status.err { background: #ffebe9; color: #82071e; border: 1px solid #ffcecb; }
+    .arc-item-status.inf { background: #ddf4ff; color: #0969da; border: 1px solid #b6e3ff; }
     .arc-del { background: none; border: none; cursor: pointer; color: #cf222e; font-size: 14px; padding: 0 3px; border-radius: 4px; }
     .arc-del:hover { background: #ffebe9; }
     .arc-add { width: 100%; padding: 6px; border: 1px dashed #d0d7de; border-radius: 5px; background: none; color: #57606a; font-size: 12px; cursor: pointer; margin-top: 4px; }
@@ -865,14 +923,14 @@
     `;
 
     // Render account list items
-    accounts.forEach(a => addAccountItem(a));
+    accounts.forEach(a => addAccountItem(a, { collapsed: true }));
 
     // Tabs
     panel.querySelector('#arc-tab-list').addEventListener('click', () => switchMode('list', panel));
     panel.querySelector('#arc-tab-json').addEventListener('click', () => switchMode('json', panel));
 
     // Add account
-    panel.querySelector('#arc-add-btn').addEventListener('click', () => addAccountItem({}));
+    panel.querySelector('#arc-add-btn').addEventListener('click', () => addAccountItem({}, { collapsed: false }));
 
     // JSON live validation
     const jsonTa = panel.querySelector('#arc-json-ta');
@@ -925,47 +983,154 @@
     });
   }
 
-  function addAccountItem(data) {
+  function addAccountItem(data, options = {}) {
     const list = document.getElementById('arc-account-list');
     if (!list) return;
     const idx = list.children.length + 1;
     const item = document.createElement('div');
-    item.className = 'arc-item';
+    const { collapsed = Boolean(data.domain) } = options;
+    item.className = `arc-item${collapsed ? ' collapsed' : ''}`;
     const isHeibai = (data.domain || '').includes('cdk.hybgzs.com');
     const cookieNameVal = isHeibai ? '(多cookie自动提取)' : esc(data.cookie_name || 'session');
     const cookieDisabled = isHeibai ? 'disabled' : '';
     const apiUserPlaceholder = isHeibai ? '自动从 cookie 获取' : '留空则同步时自动获取';
     item.innerHTML = `
       <div class="arc-item-hdr">
-        <span class="arc-item-lbl">账号 ${idx}${isHeibai ? ' (heibai)' : ''}</span>
-        <button class="arc-del" title="删除">✕</button>
-      </div>
-      <div class="arc-row">
-        <div class="arc-field" style="flex:2">
-          <label>domain（必填）</label>
-          <input type="text" class="f-domain" placeholder="https://anyrouter.top" value="${esc(data.domain || '')}">
+        <div class="arc-item-title">
+          <button class="arc-item-toggle" title="展开/收起" type="button">▾</button>
+          <span class="arc-item-lbl">账号 ${idx}</span>
+          <span class="arc-item-summary">${esc(data.domain || '未填写 domain')}</span>
         </div>
-        <div class="arc-field">
-          <label>cookie_name</label>
-          <input type="text" class="f-cookie_name" placeholder="session" value="${cookieNameVal}" ${cookieDisabled}>
+        <div class="arc-item-actions">
+          <button class="arc-item-test" title="只测试当前网站是否支持" type="button">测试</button>
+          <button class="arc-del" title="删除">✕</button>
         </div>
       </div>
-      <div class="arc-row">
-        <div class="arc-field">
-          <label>api_user <span style="font-weight:400;color:#8b949e;font-style:italic">自动解析</span></label>
-          <input type="text" class="f-api_user" placeholder="${apiUserPlaceholder}" value="${esc(data.api_user || '')}">
+      <div class="arc-item-body">
+        <div class="arc-row">
+          <div class="arc-field" style="flex:2">
+            <label>domain（必填）</label>
+            <input type="text" class="f-domain" placeholder="https://anyrouter.top" value="${esc(data.domain || '')}">
+          </div>
+          <div class="arc-field">
+            <label>cookie_name</label>
+            <input type="text" class="f-cookie_name" placeholder="session" value="${cookieNameVal}" ${cookieDisabled}>
+          </div>
         </div>
-        <div class="arc-field">
-          <label>env_key_suffix <span style="font-weight:400;color:#8b949e;font-style:italic">自动生成</span></label>
-          <input type="text" class="f-env_key_suffix" placeholder="留空则生成为 {api_user}_{PROVIDER}" value="${esc(data.env_key_suffix || '')}">
+        <div class="arc-row">
+          <div class="arc-field">
+            <label>api_user <span style="font-weight:400;color:#8b949e;font-style:italic">自动解析</span></label>
+            <input type="text" class="f-api_user" placeholder="${apiUserPlaceholder}" value="${esc(data.api_user || '')}">
+          </div>
+          <div class="arc-field">
+            <label>env_key_suffix <span style="font-weight:400;color:#8b949e;font-style:italic">自动生成</span></label>
+            <input type="text" class="f-env_key_suffix" placeholder="留空则生成为 {api_user}_{PROVIDER}" value="${esc(data.env_key_suffix || '')}">
+          </div>
         </div>
+        <div class="arc-item-status"></div>
       </div>
     `;
+
+    item.querySelector('.arc-item-toggle').addEventListener('click', () => {
+      item.classList.toggle('collapsed');
+    });
+
+    item.querySelector('.arc-item-test').addEventListener('click', async () => {
+      const account = collectAccountFromItem(item);
+      if (!account) {
+        setItemTestState(item, 'error');
+        setItemStatus(item, '请先填写该网站的 domain', 'err');
+        return;
+      }
+      setItemTestState(item, 'loading');
+      setItemStatus(item, '正在测试当前网站...', 'inf');
+      try {
+        const response = await testOneAccount(account);
+        if (response.success && !response.partial) {
+          setItemTestState(item, 'success');
+          setItemStatus(item, formatTestResult(response), 'ok');
+        } else if (response.success) {
+          setItemTestState(item, 'error');
+          setItemStatus(item, formatTestResult(response), 'err');
+        } else {
+          setItemTestState(item, 'error');
+          setItemStatus(item, `不支持：${response.error || '未知错误'}`, 'err');
+        }
+      } catch (e) {
+        setItemTestState(item, 'error');
+        setItemStatus(item, `测试失败：${e.message}`, 'err');
+      }
+    });
+
     item.querySelector('.arc-del').addEventListener('click', () => {
       item.remove();
       document.querySelectorAll('.arc-item-lbl').forEach((el, i) => { el.textContent = `账号 ${i + 1}`; });
     });
+
+    item.querySelectorAll('input').forEach(input => {
+      input.addEventListener('input', () => {
+        const summary = item.querySelector('.arc-item-summary');
+        if (summary) summary.textContent = item.querySelector('.f-domain')?.value.trim() || '未填写 domain';
+        clearItemStatus(item);
+        setItemTestState(item, 'idle');
+      });
+    });
+
     list.appendChild(item);
+  }
+
+  function collectAccountFromItem(item) {
+    const domain = item.querySelector('.f-domain').value.trim();
+    if (!domain) return null;
+    const entry = { domain };
+    const api_user       = item.querySelector('.f-api_user').value.trim();
+    const env_key_suffix = item.querySelector('.f-env_key_suffix').value.trim();
+    const cookie_name    = item.querySelector('.f-cookie_name').value.trim();
+    if (api_user)       entry.api_user       = api_user;
+    if (env_key_suffix) entry.env_key_suffix = env_key_suffix;
+    if (cookie_name && cookie_name !== 'session') entry.cookie_name = cookie_name;
+    return entry;
+  }
+
+  function setItemTestState(item, state) {
+    const btn = item.querySelector('.arc-item-test');
+    if (!btn) return;
+    btn.disabled = false;
+    btn.classList.remove('is-loading', 'is-success', 'is-error');
+    if (state === 'loading')      { btn.textContent = '测试中'; btn.disabled = true; btn.classList.add('is-loading'); }
+    else if (state === 'success') { btn.textContent = '成功'; btn.classList.add('is-success'); }
+    else if (state === 'error')   { btn.textContent = '失败'; btn.classList.add('is-error'); }
+    else                          { btn.textContent = '测试'; }
+  }
+
+  function setItemStatus(item, message, type) {
+    const el = item.querySelector('.arc-item-status');
+    if (!el) return;
+    el.textContent = message;
+    el.className = `arc-item-status ${type}`;
+    el.style.display = 'block';
+  }
+
+  function clearItemStatus(item) {
+    const el = item.querySelector('.arc-item-status');
+    if (!el) return;
+    el.style.display = 'none';
+    el.textContent = '';
+    el.className = 'arc-item-status';
+  }
+
+  function formatTestResult(response) {
+    const result = response?.result || {};
+    if (response?.partial) {
+      const parts = ['部分支持', '已获取登录态'];
+      if (result.provider) parts.push(`provider=${result.provider}`);
+      parts.push('未解析到 api_user');
+      return parts.join(' · ');
+    }
+    const parts = ['支持'];
+    if (result.api_user) parts.push(`api_user=${result.api_user}`);
+    if (result.provider) parts.push(`provider=${result.provider}`);
+    return parts.join(' · ');
   }
 
   function switchMode(mode, panel) {
@@ -1003,19 +1168,7 @@
   }
 
   function collectFromList() {
-    return Array.from(document.querySelectorAll('.arc-item')).map(item => {
-      const domain = item.querySelector('.f-domain').value.trim();
-      if (!domain) return null;
-      const entry = { domain };
-      const api_user        = item.querySelector('.f-api_user').value.trim();
-      const env_key_suffix  = item.querySelector('.f-env_key_suffix').value.trim();
-      const cookie_name     = item.querySelector('.f-cookie_name').value.trim();
-      if (api_user)        entry.api_user        = api_user;
-      if (env_key_suffix)  entry.env_key_suffix  = env_key_suffix;
-      // Only persist cookie_name if non-default
-      if (cookie_name && cookie_name !== 'session') entry.cookie_name = cookie_name;
-      return entry;
-    }).filter(Boolean);
+    return Array.from(document.querySelectorAll('.arc-item')).map(collectAccountFromItem).filter(Boolean);
   }
 
   function collectFromJson(panel) {

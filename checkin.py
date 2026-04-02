@@ -668,7 +668,7 @@ async def check_in_with_turnstile_browser(
 
 				# 检查是否已签到
 				already_signed = page.locator('text=今日已签到')
-				checkin_btn = page.locator('button:has-text("立即签到")')
+				checkin_btn = page.locator('button:has-text("立即签到"), button:has-text("签到"):not(:has-text("今日已签到"))')
 
 				if await already_signed.count() > 0:
 					print(f'[SUCCESS] {account_name}: Already checked in today')
@@ -680,12 +680,31 @@ async def check_in_with_turnstile_browser(
 					await context.close()
 					return False, user_info_before, None
 
+				# 如果 Turnstile 已经弹出（覆盖按钮），先解决它
+				has_turnstile_before = any(
+					'challenges.cloudflare.com' in f.url for f in page.frames
+				)
+				if has_turnstile_before:
+					print(f'[INFO] {account_name}: Turnstile overlay detected before click, solving first...')
+					await _solve_turnstile(page, account_name)
+					await page.wait_for_timeout(2000)
+
 				# 点击签到按钮
 				print(f'[PROCESSING] {account_name}: Clicking check-in button...')
-				await checkin_btn.click()
+				try:
+					await checkin_btn.first.click(timeout=10000)
+				except Exception as e:
+					# 按钮可能被遮挡或未完全渲染，使用 force click
+					print(f'[INFO] {account_name}: Normal click failed ({type(e).__name__}), trying force click...')
+					try:
+						await checkin_btn.first.click(timeout=5000, force=True)
+					except Exception as click_err:
+						print(f'[FAILED] {account_name}: Check-in button not clickable: {str(click_err)[:80]}')
+						await context.close()
+						return False, user_info_before, None
 				await page.wait_for_timeout(2000)
 
-				# 解决 Turnstile 验证
+				# 解决 Turnstile 验证（点击后弹出）
 				turnstile_solved = await _solve_turnstile(page, account_name)
 				if not turnstile_solved:
 					print(f'[FAILED] {account_name}: Failed to solve Turnstile verification')

@@ -261,6 +261,7 @@ ANYROUTER_ACCOUNT_760_COMPUTETOKEN
 | :--- | :---: | :--- |
 | `anyrouter` | ✅ waf_cookies | `/api/user/sign_in` |
 | `agentrouter` | ✅ waf_cookies | 查询用户信息时自动签到 |
+| `heibai` | ✅ turnstile_browser | Playwright 浏览器交互签到 |
 
 > 其余平台通过 `PROVIDERS` secret 或插件自动同步。标准 new-api / one-api 站点使用默认路径，404 时自动回退到 `/api/user/checkin`。
 
@@ -322,6 +323,7 @@ ANYROUTER_ACCOUNT_760_COMPUTETOKEN
 | 需要开发者模式 | ✅ | ❌ |
 | 后台定时触发 | ✅ | ⚠️ 页面加载时 |
 | 跨站点 cookie | ✅ | ⚠️ 需在对应站点 |
+| 单账号测试 | ✅ | ✅ |
 
 ---
 
