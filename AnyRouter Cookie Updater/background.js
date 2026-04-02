@@ -30,6 +30,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   } else if (request.action === 'syncNow') {
     syncAllAccounts().then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
     return true;
+  } else if (request.action === 'testAccount') {
+    testOneAccount(request.account).then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
+    return true;
   } else if (request.action === 'getLogs') {
     Logger.getLogs().then(logs => sendResponse({ success: true, logs }));
     return true;
@@ -94,6 +97,29 @@ async function syncAllAccounts() {
   const summary = `${okCount}/${results.length} 账号同步成功`;
   await Logger.info('Sync completed', { summary });
   return { success: okCount > 0, summary, results };
+}
+
+async function testOneAccount(account) {
+  if (!account || !account.domain) {
+    return { success: false, error: '缺少 domain' };
+  }
+
+  const result = await syncOneAccount(null, account, { dryRun: true });
+  if (!result.success) {
+    return result;
+  }
+
+  const parts = [`cookie=${result.cookieName}`];
+  if (result.api_user) parts.push(`api_user=${result.api_user}`);
+  if (result.provider) parts.push(`provider=${result.provider}`);
+  const partial = !result.api_user;
+
+  return {
+    success: true,
+    summary: parts.join(' · '),
+    partial,
+    result,
+  };
 }
 
 // Build and push PROVIDERS secret for all non-builtin domains
@@ -698,8 +724,9 @@ async function diagnoseCookieAccess(url, hostname) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function syncOneAccount(config, account) {
+async function syncOneAccount(config, account, options = {}) {
   const { domain, cookie_name } = account;
+  const { dryRun = false } = options;
   let { api_user, env_key_suffix } = account;
   const targetCookieName = cookie_name || 'session';
   const label = env_key_suffix || domain;
@@ -834,6 +861,22 @@ async function syncOneAccount(config, account) {
     // Determine secret suffix
     const providerTag = getProviderTag(domain);
     const providerName = providerTag.toLowerCase();
+
+    if (dryRun) {
+      await Logger.success(`Test passed for ${label}`, {
+        cookie_name: targetCookieName,
+        api_user: api_user || null,
+        provider: providerName,
+      });
+      return {
+        success: true,
+        label,
+        api_user,
+        provider: providerName,
+        cookieName: targetCookieName,
+      };
+    }
+
     if (!env_key_suffix) {
       if (!api_user) {
         await Logger.error(`Cannot determine secret name for ${label}: no env_key_suffix and api_user unavailable`);

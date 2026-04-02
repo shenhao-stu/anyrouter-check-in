@@ -37,7 +37,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('tabList').addEventListener('click', () => switchTab('list'));
   document.getElementById('tabJson').addEventListener('click', () => switchTab('json'));
-  document.getElementById('addAccountBtn').addEventListener('click', () => addAccountItem({}));
+  document.getElementById('addAccountBtn').addEventListener('click', () => addAccountItem({}, { collapsed: false }));
   document.getElementById('saveBtn').addEventListener('click', save);
   document.getElementById('syncBtn').addEventListener('click', syncNow);
   document.getElementById('logsBtn').addEventListener('click', () => { window.location.href = 'logs.html'; });
@@ -95,17 +95,18 @@ function renderList(accounts) {
   const list = document.getElementById('accountList');
   list.innerHTML = '';
   if (!accounts || accounts.length === 0) {
-    addAccountItem({});
+    addAccountItem({}, { collapsed: false });
   } else {
-    accounts.forEach(a => addAccountItem(a));
+    accounts.forEach(a => addAccountItem(a, { collapsed: true }));
   }
 }
 
-function addAccountItem(data = {}) {
+function addAccountItem(data = {}, options = {}) {
   const list = document.getElementById('accountList');
   const idx  = list.children.length + 1;
   const item = document.createElement('div');
-  item.className = 'account-item';
+  const { collapsed = Boolean(data.domain) } = options;
+  item.className = `account-item${collapsed ? ' collapsed' : ''}`;
   // cookie_name defaults to 'session', no extra label text needed
   const isHeibai = (data.domain || '').includes('cdk.hybgzs.com');
   const cookieNameVal = isHeibai ? '(多cookie自动提取)' : esc(data.cookie_name || 'session');
@@ -113,57 +114,191 @@ function addAccountItem(data = {}) {
   const apiUserPlaceholder = isHeibai ? '自动从 cookie 获取' : '留空则同步时自动获取';
   item.innerHTML = `
     <div class="account-item-header">
-      <span class="account-item-label">账号 ${idx}${isHeibai ? ' (heibai)' : ''}</span>
-      <button class="account-item-del" title="删除" type="button">✕</button>
-    </div>
-    <div class="account-row">
-      <div class="field-wrap" style="flex:2">
-        <label>domain（必填）</label>
-        <input type="text" class="f-domain" placeholder="https://anyrouter.top" value="${esc(data.domain || '')}">
+      <div class="account-item-title">
+        <button class="account-item-toggle" title="展开/收起" type="button">▾</button>
+        <span class="account-item-label">账号 ${idx}</span>
+        <span class="account-item-summary">${esc(getAccountSummary(data))}</span>
       </div>
-      <div class="field-wrap">
-        <label>cookie_name</label>
-        <input type="text" class="f-cookie_name" placeholder="session" value="${cookieNameVal}" ${cookieDisabled}>
+      <div class="account-item-actions">
+        <button class="account-item-test" title="只测试当前网站是否支持" type="button">测试</button>
+        <button class="account-item-del" title="删除" type="button">✕</button>
       </div>
     </div>
-    <div class="account-row">
-      <div class="field-wrap">
-        <label>api_user <span class="field-opt">自动解析</span></label>
-        <input type="text" class="f-api_user" placeholder="${apiUserPlaceholder}" value="${esc(data.api_user || '')}">
+    <div class="account-item-body">
+      <div class="account-row">
+        <div class="field-wrap" style="flex:2">
+          <label>domain（必填）</label>
+          <input type="text" class="f-domain" placeholder="https://anyrouter.top" value="${esc(data.domain || '')}">
+        </div>
+        <div class="field-wrap">
+          <label>cookie_name</label>
+          <input type="text" class="f-cookie_name" placeholder="session" value="${cookieNameVal}">
+        </div>
       </div>
-      <div class="field-wrap">
-        <label>env_key_suffix <span class="field-opt">自动生成</span></label>
-        <input type="text" class="f-env_key_suffix" placeholder="留空则生成为 {api_user}_{PROVIDER}" value="${esc(data.env_key_suffix || '')}">
+      <div class="account-row">
+        <div class="field-wrap">
+          <label>api_user <span class="field-opt">自动解析</span></label>
+          <input type="text" class="f-api_user" placeholder="留空则同步时自动获取" value="${esc(data.api_user || '')}">
+        </div>
+        <div class="field-wrap">
+          <label>env_key_suffix <span class="field-opt">自动生成</span></label>
+          <input type="text" class="f-env_key_suffix" placeholder="留空则生成为 {api_user}_{PROVIDER}" value="${esc(data.env_key_suffix || '')}">
+        </div>
       </div>
+      <div class="account-item-status"></div>
     </div>
   `;
+
+  item.querySelector('.account-item-toggle').addEventListener('click', () => {
+    item.classList.toggle('collapsed');
+  });
+
+  item.querySelector('.account-item-test').addEventListener('click', () => {
+    testAccountItem(item);
+  });
+
   item.querySelector('.account-item-del').addEventListener('click', () => {
     item.remove();
     reindexList();
   });
+
+  item.querySelectorAll('input').forEach(input => {
+    input.addEventListener('input', () => {
+      updateAccountSummary(item);
+      clearAccountStatus(item);
+      setTestButtonState(item, 'idle');
+    });
+  });
+
   list.appendChild(item);
+  setTestButtonState(item, 'idle');
 }
 
 function reindexList() {
   document.querySelectorAll('.account-item').forEach((item, i) => {
     const label = item.querySelector('.account-item-label');
     if (label) label.textContent = `账号 ${i + 1}`;
+    updateAccountSummary(item);
   });
 }
 
 function collectFromList() {
-  return Array.from(document.querySelectorAll('.account-item')).map(item => {
-    const domain = item.querySelector('.f-domain').value.trim();
-    if (!domain) return null;
-    const entry = { domain };
-    const api_user        = item.querySelector('.f-api_user').value.trim();
-    const env_key_suffix  = item.querySelector('.f-env_key_suffix').value.trim();
-    const cookie_name     = item.querySelector('.f-cookie_name').value.trim();
-    if (api_user)        entry.api_user        = api_user;
-    if (env_key_suffix)  entry.env_key_suffix  = env_key_suffix;
-    if (cookie_name && cookie_name !== 'session') entry.cookie_name = cookie_name;
-    return entry;
-  }).filter(Boolean);
+  return Array.from(document.querySelectorAll('.account-item')).map(collectAccountFromItem).filter(Boolean);
+}
+
+function collectAccountFromItem(item) {
+  const domain = item.querySelector('.f-domain').value.trim();
+  if (!domain) return null;
+  const entry = { domain };
+  const api_user        = item.querySelector('.f-api_user').value.trim();
+  const env_key_suffix  = item.querySelector('.f-env_key_suffix').value.trim();
+  const cookie_name     = item.querySelector('.f-cookie_name').value.trim();
+  if (api_user)        entry.api_user        = api_user;
+  if (env_key_suffix)  entry.env_key_suffix  = env_key_suffix;
+  if (cookie_name && cookie_name !== 'session') entry.cookie_name = cookie_name;
+  return entry;
+}
+
+function getAccountSummary(account) {
+  return account?.domain || '未填写 domain';
+}
+
+function updateAccountSummary(item) {
+  const summary = item.querySelector('.account-item-summary');
+  if (!summary) return;
+  const account = collectAccountFromItem(item) || { domain: '', cookie_name: item.querySelector('.f-cookie_name')?.value.trim() || 'session' };
+  summary.textContent = getAccountSummary(account);
+}
+
+function setAccountStatus(item, message, type) {
+  const el = item.querySelector('.account-item-status');
+  if (!el) return;
+  el.textContent = message;
+  el.className = `account-item-status ${type}`;
+  el.style.display = 'block';
+}
+
+function clearAccountStatus(item) {
+  const el = item.querySelector('.account-item-status');
+  if (!el) return;
+  el.style.display = 'none';
+  el.textContent = '';
+  el.className = 'account-item-status';
+}
+
+function setTestButtonState(item, state) {
+  const btn = item.querySelector('.account-item-test');
+  if (!btn) return;
+
+  btn.disabled = false;
+  btn.classList.remove('is-loading', 'is-success', 'is-error');
+
+  if (state === 'loading') {
+    btn.textContent = '测试中';
+    btn.disabled = true;
+    btn.classList.add('is-loading');
+    return;
+  }
+
+  if (state === 'success') {
+    btn.textContent = '成功';
+    btn.classList.add('is-success');
+    return;
+  }
+
+  if (state === 'error') {
+    btn.textContent = '失败';
+    btn.classList.add('is-error');
+    return;
+  }
+
+  btn.textContent = '测试';
+}
+
+function testAccountItem(item) {
+  const account = collectAccountFromItem(item);
+  if (!account) {
+    setTestButtonState(item, 'error');
+    setAccountStatus(item, '请先填写该网站的 domain', 'error');
+    return;
+  }
+
+  setTestButtonState(item, 'loading');
+  setAccountStatus(item, '正在测试当前网站...', 'info');
+
+  chrome.runtime.sendMessage({ action: 'testAccount', account }, (response) => {
+    if (chrome.runtime.lastError) {
+      setTestButtonState(item, 'error');
+      setAccountStatus(item, `测试失败：${chrome.runtime.lastError.message}`, 'error');
+      return;
+    }
+
+    if (response && response.success && !response.partial) {
+      setTestButtonState(item, 'success');
+      setAccountStatus(item, formatTestResultMessage(response), 'success');
+    } else if (response && response.success) {
+      setTestButtonState(item, 'error');
+      setAccountStatus(item, formatTestResultMessage(response), 'error');
+    } else {
+      setTestButtonState(item, 'error');
+      setAccountStatus(item, `不支持：${response ? response.error || '未知错误' : '未知错误'}`, 'error');
+    }
+  });
+}
+
+function formatTestResultMessage(response) {
+  const result = response?.result || {};
+  if (response?.partial) {
+    const parts = ['部分支持', '已获取登录态'];
+    if (result.provider) parts.push(`provider=${result.provider}`);
+    parts.push('未解析到 api_user');
+    return parts.join(' · ');
+  }
+
+  const parts = ['支持'];
+  if (result.api_user) parts.push(`api_user=${result.api_user}`);
+  if (result.provider) parts.push(`provider=${result.provider}`);
+  return parts.join(' · ');
 }
 
 // ---- JSON mode ----

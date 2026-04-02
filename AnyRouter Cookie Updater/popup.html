@@ -40,15 +40,51 @@
       border: 1px solid #d0d7de; border-radius: 6px; padding: 10px; background: #f6f8fa; position: relative;
     }
     .account-item-header {
-      display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
     }
-    .account-item-label { font-size: 11px; font-weight: 600; color: #57606a; }
+    .account-item-title { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+    .account-item-toggle {
+      width: 22px; height: 22px; border: 1px solid #d0d7de; background: #fff; cursor: pointer; color: #57606a;
+      font-size: 11px; line-height: 1; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 5px;
+      flex: 0 0 auto;
+    }
+    .account-item-toggle:hover { background: #eaeef2; }
+    .account-item.collapsed .account-item-toggle { transform: rotate(-90deg); }
+    .account-item-label { font-size: 11px; font-weight: 600; color: #57606a; white-space: nowrap; }
+    .account-item-summary {
+      font-size: 10px; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .account-item-actions { display: flex; align-items: center; gap: 6px; }
+    .account-item-test {
+      padding: 3px 8px; border: 1px solid #d0d7de; background: #fff; cursor: pointer; color: #0969da;
+      font-size: 11px; line-height: 1.4; border-radius: 5px;
+    }
+    .account-item-test:hover { background: #ddf4ff; border-color: #0969da; }
+    .account-item-test.is-loading {
+      background: #ddf4ff; color: #0969da; border-color: #0969da; cursor: not-allowed;
+    }
+    .account-item-test.is-success {
+      background: #2da44e; color: #fff; border-color: #2da44e;
+    }
+    .account-item-test.is-success:hover { background: #218838; border-color: #218838; }
+    .account-item-test.is-error {
+      background: #cf222e; color: #fff; border-color: #cf222e;
+    }
+    .account-item-test.is-error:hover { background: #a40e26; border-color: #a40e26; }
     .account-item-del {
       width: 20px; height: 20px; border: none; background: none; cursor: pointer; color: #cf222e;
       font-size: 14px; line-height: 1; padding: 0; display: flex; align-items: center; justify-content: center;
       border-radius: 4px;
     }
     .account-item-del:hover { background: #ffebe9; }
+    .account-item-body { margin-top: 8px; }
+    .account-item.collapsed .account-item-body { display: none; }
+    .account-item-status {
+      margin-top: 8px; padding: 6px 8px; border-radius: 5px; font-size: 11px; display: none; line-height: 1.4;
+    }
+    .account-item-status.success { background: #dafbe1; color: #116329; border: 1px solid #aceebb; }
+    .account-item-status.error { background: #ffebe9; color: #82071e; border: 1px solid #ffcecb; }
+    .account-item-status.info { background: #ddf4ff; color: #0969da; border: 1px solid #b6e3ff; }
     .account-row { display: flex; gap: 6px; margin-bottom: 6px; }
     .account-row:last-child { margin-bottom: 0; }
     .account-row input { font-size: 11px; padding: 4px 7px; }
