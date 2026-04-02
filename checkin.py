@@ -540,92 +540,128 @@ async def check_in_with_playwright(
 async def _solve_turnstile(page, account_name: str) -> bool:
 	"""查找并解决 Cloudflare Turnstile 验证
 
-	Strategy:
-	1. Find Turnstile iframe by checking frame URLs (more reliable than src attribute)
-	2. Get its bounding box and click at the center from the parent page
-	3. Fall back to clicking elements inside the iframe if needed
+	Turnstile widget structure (from parent page):
+	  input[name="cf-turnstile-response"]  (hidden token input)
+	    → parent div (.cf-turnstile wrapper)
+	      → shadowRoot
+	        → iframe (challenges.cloudflare.com)
+	          → body → shadowRoot → input (the checkbox)
+
+	The iframe is inside a shadow DOM, so normal CSS selectors can't find it.
+	We use JS shadow DOM traversal to locate and click it.
 	"""
 	print(f'[PROCESSING] {account_name}: Looking for Turnstile verification...')
 
 	for attempt in range(20):
-		# Find Turnstile iframe by iterating page.frames (checks actual URL, not src attr)
-		turnstile_frame = None
-		for frame in page.frames:
-			if 'challenges.cloudflare.com' in frame.url:
-				turnstile_frame = frame
-				break
-
-		if turnstile_frame is None:
-			await page.wait_for_timeout(1000)
-			continue
-
-		# Strategy 1: Find the iframe DOM element via JavaScript and click its center
+		# Strategy 0: Check if token already exists (managed mode auto-resolved)
 		try:
-			iframe_info = await page.evaluate("""() => {
-				const iframes = document.querySelectorAll('iframe');
-				for (const iframe of iframes) {
-					const rect = iframe.getBoundingClientRect();
-					// Look for small widget-sized iframes (Turnstile is typically 300x65)
-					// Also check src, name, and parent container hints
-					const src = iframe.src || '';
-					const parent = iframe.closest('.cf-turnstile, [data-sitekey]');
-					const isTurnstile = src.includes('challenges.cloudflare.com')
-						|| src.includes('turnstile')
-						|| parent !== null
-						|| (rect.width > 200 && rect.width < 400 && rect.height > 50 && rect.height < 100);
-					if (isTurnstile && rect.width > 0 && rect.height > 0) {
-						return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, src: src.substring(0, 80) };
+			token_check = await page.evaluate("""() => {
+				try { const r = turnstile.getResponse(); if (r) return 'has_token'; } catch(e) {}
+				const inp = document.querySelector('input[name="cf-turnstile-response"]');
+				return (inp && inp.value) ? 'has_token' : null;
+			}""")
+			if token_check == 'has_token':
+				print(f'[SUCCESS] {account_name}: Turnstile already solved (token present)')
+				return True
+		except Exception:
+			pass
+
+		# Strategy 1: Shadow DOM traversal — find iframe inside wrapper's shadowRoot
+		try:
+			iframe_box = await page.evaluate("""() => {
+				// Path: input[name="cf-turnstile-response"] → parent → shadowRoot → iframe
+				const resp = document.querySelector('input[name="cf-turnstile-response"]');
+				if (resp) {
+					const wrapper = resp.parentElement;
+					if (wrapper && wrapper.shadowRoot) {
+						const iframe = wrapper.shadowRoot.querySelector('iframe');
+						if (iframe) {
+							const rect = iframe.getBoundingClientRect();
+							if (rect.width > 0 && rect.height > 0) {
+								return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, method: 'shadow_dom' };
+							}
+						}
+					}
+				}
+				// Fallback: try [data-sitekey] wrapper
+				const sitekey = document.querySelector('[data-sitekey]');
+				if (sitekey && sitekey.shadowRoot) {
+					const iframe = sitekey.shadowRoot.querySelector('iframe');
+					if (iframe) {
+						const rect = iframe.getBoundingClientRect();
+						if (rect.width > 0 && rect.height > 0) {
+							return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, method: 'sitekey_shadow' };
+						}
+					}
+				}
+				// Fallback: try .cf-turnstile wrapper
+				const cfDiv = document.querySelector('.cf-turnstile');
+				if (cfDiv && cfDiv.shadowRoot) {
+					const iframe = cfDiv.shadowRoot.querySelector('iframe');
+					if (iframe) {
+						const rect = iframe.getBoundingClientRect();
+						if (rect.width > 0 && rect.height > 0) {
+							return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, method: 'cf_turnstile_shadow' };
+						}
 					}
 				}
 				return null;
 			}""")
 
-			if iframe_info:
-				cx = iframe_info['x'] + iframe_info['width'] / 2
-				cy = iframe_info['y'] + iframe_info['height'] / 2
-				print(f'[INFO] {account_name}: Found Turnstile iframe ({iframe_info["width"]:.0f}x{iframe_info["height"]:.0f}), clicking center ({cx:.0f},{cy:.0f})...')
+			if iframe_box:
+				cx = iframe_box['x'] + iframe_box['width'] / 2
+				cy = iframe_box['y'] + iframe_box['height'] / 2
+				print(f'[INFO] {account_name}: Found Turnstile via {iframe_box["method"]} ({iframe_box["width"]:.0f}x{iframe_box["height"]:.0f}), clicking ({cx:.0f},{cy:.0f})...')
 				await page.mouse.click(cx, cy)
 				await page.wait_for_timeout(3000)
 
-				# Check if Turnstile was solved
-				token = await page.evaluate("""() => {
+				# Verify solution
+				solved = await page.evaluate("""() => {
+					try { const r = turnstile.getResponse(); if (r) return true; } catch(e) {}
 					const inp = document.querySelector('input[name="cf-turnstile-response"]');
-					return inp && inp.value ? 'has_token' : null;
+					return !!(inp && inp.value);
 				}""")
-				if token:
-					print(f'[SUCCESS] {account_name}: Turnstile solved (token present)')
-					return True
-
-				still_present = any('challenges.cloudflare.com' in f.url for f in page.frames)
-				if not still_present:
-					print(f'[SUCCESS] {account_name}: Turnstile solved (iframe removed)')
+				if solved:
+					print(f'[SUCCESS] {account_name}: Turnstile solved after click')
 					return True
 		except Exception as e:
 			if attempt < 2:
-				print(f'[WARN] {account_name}: Turnstile click error: {str(e)[:80]}')
+				print(f'[WARN] {account_name}: Shadow DOM traversal error: {str(e)[:80]}')
 
-		# Strategy 2: Try clicking inside the iframe directly
-		try:
-			result = await turnstile_frame.evaluate("""() => {
-				const body = document.body;
-				if (body && body.shadowRoot) {
-					const inp = body.shadowRoot.querySelector('input');
-					if (inp) { inp.click(); return 'clicked_shadow'; }
-				}
-				const inp = document.querySelector('input[type="checkbox"], input');
-				if (inp) { inp.click(); return 'clicked_input'; }
-				const clickable = document.querySelector('[role="checkbox"], [tabindex], button');
-				if (clickable) { clickable.click(); return 'clicked_element'; }
-				return 'no_element';
-			}""")
-			if result.startswith('clicked'):
-				print(f'[INFO] {account_name}: Turnstile inner click: {result}')
-				await page.wait_for_timeout(3000)
-				return True
-			elif attempt < 3:
-				print(f'[INFO] {account_name}: Turnstile inner: {result} (attempt {attempt + 1})')
-		except Exception:
-			pass
+		# Strategy 2: Inner-frame element click (legacy fallback)
+		for frame in page.frames:
+			if 'challenges.cloudflare.com' not in frame.url:
+				continue
+			try:
+				result = await frame.evaluate("""() => {
+					const body = document.body;
+					if (body && body.shadowRoot) {
+						const inp = body.shadowRoot.querySelector('input');
+						if (inp) { inp.click(); return 'clicked_shadow'; }
+					}
+					const inp = document.querySelector('input[type="checkbox"], input');
+					if (inp) { inp.click(); return 'clicked_input'; }
+					const clickable = document.querySelector('[role="checkbox"], [tabindex], button');
+					if (clickable) { clickable.click(); return 'clicked_element'; }
+					return 'no_element';
+				}""")
+				if result.startswith('clicked'):
+					print(f'[INFO] {account_name}: Turnstile inner click: {result}')
+					await page.wait_for_timeout(3000)
+					return True
+				elif attempt < 3:
+					print(f'[INFO] {account_name}: Turnstile inner: {result} (attempt {attempt + 1})')
+			except Exception:
+				pass
+			break  # Only process first matching frame
+
+		# On first attempt, try turnstile.reset() to trigger fresh challenge
+		if attempt == 3:
+			try:
+				await page.evaluate('try { turnstile.reset() } catch(e) {}')
+				print(f'[INFO] {account_name}: Called turnstile.reset()')
+			except Exception:
+				pass
 
 		await page.wait_for_timeout(1000)
 
