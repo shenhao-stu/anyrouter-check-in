@@ -559,55 +559,47 @@ async def _solve_turnstile(page, account_name: str) -> bool:
 			await page.wait_for_timeout(1000)
 			continue
 
-		# Strategy 1: Click the iframe element's center from the parent page
+		# Strategy 1: Find the iframe DOM element via JavaScript and click its center
 		try:
-			# Find the iframe element in the DOM that hosts this frame
-			iframe_element = None
-			for iframe_locator_str in [
-				'iframe[src*="challenges.cloudflare.com"]',
-				'iframe[src*="turnstile"]',
-				'.cf-turnstile iframe',
-				'[data-sitekey] iframe',
-			]:
-				loc = page.locator(iframe_locator_str)
-				if await loc.count() > 0:
-					iframe_element = loc.first
-					break
+			iframe_info = await page.evaluate("""() => {
+				const iframes = document.querySelectorAll('iframe');
+				for (const iframe of iframes) {
+					const rect = iframe.getBoundingClientRect();
+					// Look for small widget-sized iframes (Turnstile is typically 300x65)
+					// Also check src, name, and parent container hints
+					const src = iframe.src || '';
+					const parent = iframe.closest('.cf-turnstile, [data-sitekey]');
+					const isTurnstile = src.includes('challenges.cloudflare.com')
+						|| src.includes('turnstile')
+						|| parent !== null
+						|| (rect.width > 200 && rect.width < 400 && rect.height > 50 && rect.height < 100);
+					if (isTurnstile && rect.width > 0 && rect.height > 0) {
+						return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, src: src.substring(0, 80) };
+					}
+				}
+				return null;
+			}""")
 
-			# Fallback: find any iframe whose content URL matches
-			if iframe_element is None:
-				all_iframes = page.locator('iframe')
-				count = await all_iframes.count()
-				for i in range(count):
-					el = all_iframes.nth(i)
-					src = await el.get_attribute('src') or ''
-					if 'challenges.cloudflare.com' in src or 'turnstile' in src:
-						iframe_element = el
-						break
+			if iframe_info:
+				cx = iframe_info['x'] + iframe_info['width'] / 2
+				cy = iframe_info['y'] + iframe_info['height'] / 2
+				print(f'[INFO] {account_name}: Found Turnstile iframe ({iframe_info["width"]:.0f}x{iframe_info["height"]:.0f}), clicking center ({cx:.0f},{cy:.0f})...')
+				await page.mouse.click(cx, cy)
+				await page.wait_for_timeout(3000)
 
-			if iframe_element:
-				box = await iframe_element.bounding_box()
-				if box and box['width'] > 0 and box['height'] > 0:
-					cx = box['x'] + box['width'] / 2
-					cy = box['y'] + box['height'] / 2
-					print(f'[INFO] {account_name}: Found Turnstile iframe ({box["width"]:.0f}x{box["height"]:.0f}), clicking center ({cx:.0f},{cy:.0f})...')
-					await page.mouse.click(cx, cy)
-					await page.wait_for_timeout(3000)
+				# Check if Turnstile was solved
+				token = await page.evaluate("""() => {
+					const inp = document.querySelector('input[name="cf-turnstile-response"]');
+					return inp && inp.value ? 'has_token' : null;
+				}""")
+				if token:
+					print(f'[SUCCESS] {account_name}: Turnstile solved (token present)')
+					return True
 
-					# Check if Turnstile was solved
-					token = await page.evaluate("""() => {
-						const inp = document.querySelector('input[name="cf-turnstile-response"]');
-						return inp && inp.value ? 'has_token' : null;
-					}""")
-					if token:
-						print(f'[SUCCESS] {account_name}: Turnstile solved (token present)')
-						return True
-
-					# Check if Turnstile iframe disappeared
-					still_present = any('challenges.cloudflare.com' in f.url for f in page.frames)
-					if not still_present:
-						print(f'[SUCCESS] {account_name}: Turnstile solved (iframe removed)')
-						return True
+				still_present = any('challenges.cloudflare.com' in f.url for f in page.frames)
+				if not still_present:
+					print(f'[SUCCESS] {account_name}: Turnstile solved (iframe removed)')
+					return True
 		except Exception as e:
 			if attempt < 2:
 				print(f'[WARN] {account_name}: Turnstile click error: {str(e)[:80]}')
