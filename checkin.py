@@ -541,32 +541,60 @@ async def _solve_turnstile(page, account_name: str) -> bool:
 	"""查找并解决 Cloudflare Turnstile 验证
 
 	Strategy:
-	1. Find Turnstile iframe on the page
-	2. Click at its center (modern Turnstile uses click-anywhere, not checkbox)
+	1. Find Turnstile iframe by checking frame URLs (more reliable than src attribute)
+	2. Get its bounding box and click at the center from the parent page
 	3. Fall back to clicking elements inside the iframe if needed
 	"""
 	print(f'[PROCESSING] {account_name}: Looking for Turnstile verification...')
 
 	for attempt in range(20):
-		# Strategy 1: Find Turnstile iframe and click its center from parent page
-		turnstile_frame_element = page.frame_locator('iframe[src*="challenges.cloudflare.com"]').owner
+		# Find Turnstile iframe by iterating page.frames (checks actual URL, not src attr)
+		turnstile_frame = None
+		for frame in page.frames:
+			if 'challenges.cloudflare.com' in frame.url:
+				turnstile_frame = frame
+				break
+
+		if turnstile_frame is None:
+			await page.wait_for_timeout(1000)
+			continue
+
+		# Strategy 1: Click the iframe element's center from the parent page
 		try:
-			if await turnstile_frame_element.count() > 0:
-				box = await turnstile_frame_element.first.bounding_box()
-				if box:
+			# Find the iframe element in the DOM that hosts this frame
+			iframe_element = None
+			for iframe_locator_str in [
+				'iframe[src*="challenges.cloudflare.com"]',
+				'iframe[src*="turnstile"]',
+				'.cf-turnstile iframe',
+				'[data-sitekey] iframe',
+			]:
+				loc = page.locator(iframe_locator_str)
+				if await loc.count() > 0:
+					iframe_element = loc.first
+					break
+
+			# Fallback: find any iframe whose content URL matches
+			if iframe_element is None:
+				all_iframes = page.locator('iframe')
+				count = await all_iframes.count()
+				for i in range(count):
+					el = all_iframes.nth(i)
+					src = await el.get_attribute('src') or ''
+					if 'challenges.cloudflare.com' in src or 'turnstile' in src:
+						iframe_element = el
+						break
+
+			if iframe_element:
+				box = await iframe_element.bounding_box()
+				if box and box['width'] > 0 and box['height'] > 0:
 					cx = box['x'] + box['width'] / 2
 					cy = box['y'] + box['height'] / 2
 					print(f'[INFO] {account_name}: Found Turnstile iframe ({box["width"]:.0f}x{box["height"]:.0f}), clicking center ({cx:.0f},{cy:.0f})...')
 					await page.mouse.click(cx, cy)
 					await page.wait_for_timeout(3000)
 
-					# Check if Turnstile was solved (iframe disappeared or response token appeared)
-					remaining = await turnstile_frame_element.count()
-					if remaining == 0:
-						print(f'[SUCCESS] {account_name}: Turnstile solved (iframe removed)')
-						return True
-
-					# Check for response input (Turnstile sets a hidden input with the token)
+					# Check if Turnstile was solved
 					token = await page.evaluate("""() => {
 						const inp = document.querySelector('input[name="cf-turnstile-response"]');
 						return inp && inp.value ? 'has_token' : null;
@@ -575,35 +603,37 @@ async def _solve_turnstile(page, account_name: str) -> bool:
 						print(f'[SUCCESS] {account_name}: Turnstile solved (token present)')
 						return True
 
-					# Also try clicking inside iframe frames
-					for frame in page.frames:
-						if 'challenges.cloudflare.com' not in frame.url:
-							continue
-						try:
-							result = await frame.evaluate("""() => {
-								// Try shadow DOM input
-								const body = document.body;
-								if (body && body.shadowRoot) {
-									const inp = body.shadowRoot.querySelector('input');
-									if (inp) { inp.click(); return 'clicked_shadow'; }
-								}
-								// Try any input
-								const inp = document.querySelector('input[type="checkbox"], input');
-								if (inp) { inp.click(); return 'clicked_input'; }
-								// Try clicking the body or any interactive element
-								const clickable = document.querySelector('[role="checkbox"], [tabindex], button, div[style]');
-								if (clickable) { clickable.click(); return 'clicked_element'; }
-								return 'no_element';
-							}""")
-							if result.startswith('clicked'):
-								print(f'[INFO] {account_name}: Turnstile inner click: {result}')
-								await page.wait_for_timeout(3000)
-								return True
-						except Exception:
-							pass
+					# Check if Turnstile iframe disappeared
+					still_present = any('challenges.cloudflare.com' in f.url for f in page.frames)
+					if not still_present:
+						print(f'[SUCCESS] {account_name}: Turnstile solved (iframe removed)')
+						return True
 		except Exception as e:
-			if attempt == 0:
-				print(f'[WARN] {account_name}: Turnstile interaction error: {str(e)[:60]}')
+			if attempt < 2:
+				print(f'[WARN] {account_name}: Turnstile click error: {str(e)[:80]}')
+
+		# Strategy 2: Try clicking inside the iframe directly
+		try:
+			result = await turnstile_frame.evaluate("""() => {
+				const body = document.body;
+				if (body && body.shadowRoot) {
+					const inp = body.shadowRoot.querySelector('input');
+					if (inp) { inp.click(); return 'clicked_shadow'; }
+				}
+				const inp = document.querySelector('input[type="checkbox"], input');
+				if (inp) { inp.click(); return 'clicked_input'; }
+				const clickable = document.querySelector('[role="checkbox"], [tabindex], button');
+				if (clickable) { clickable.click(); return 'clicked_element'; }
+				return 'no_element';
+			}""")
+			if result.startswith('clicked'):
+				print(f'[INFO] {account_name}: Turnstile inner click: {result}')
+				await page.wait_for_timeout(3000)
+				return True
+			elif attempt < 3:
+				print(f'[INFO] {account_name}: Turnstile inner: {result} (attempt {attempt + 1})')
+		except Exception:
+			pass
 
 		await page.wait_for_timeout(1000)
 
