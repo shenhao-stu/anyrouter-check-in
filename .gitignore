@@ -11,3 +11,4 @@ htmlcov/
 balance_hash.txt
 
 .DS_Store
+test_heibai_local.py

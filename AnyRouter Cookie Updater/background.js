@@ -314,7 +314,8 @@ async function fetchHeibaiUser(domain, cookies, tabId) {
   return null;
 }
 
-async function syncHeibaiAccount(config, account, url, hostname) {
+async function syncHeibaiAccount(config, account, url, hostname, options = {}) {
+  const { dryRun = false } = options;
   const label = account.env_key_suffix || account.domain;
   let tab = null;
 
@@ -367,6 +368,21 @@ async function syncHeibaiAccount(config, account, url, hostname) {
       return { success: false, label, error: 'cannot resolve heibai user identity' };
     }
     await Logger.success(`Heibai: resolved user: ${userId}`);
+
+    if (dryRun) {
+      if (tab) { await closeTab(tab); tab = null; }
+      await Logger.success(`Test passed for heibai ${label}`, {
+        cookies_found: foundCount,
+        user: userId,
+      });
+      return {
+        success: true,
+        label,
+        api_user: userId,
+        provider: 'heibai',
+        cookieName: '(multi-cookie)',
+      };
+    }
 
     // Determine secret name
     let { env_key_suffix } = account;
@@ -745,7 +761,7 @@ async function syncOneAccount(config, account, options = {}) {
 
     // ── Special handling: heibai multi-cookie provider ──
     if (isHeibaiProvider(domain)) {
-      return await syncHeibaiAccount(config, account, url, hostname);
+      return await syncHeibaiAccount(config, account, url, hostname, options);
     }
 
     // ── Phase 1: Try to read cookie DIRECTLY from the cookie jar (no tab needed) ──

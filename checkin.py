@@ -740,67 +740,64 @@ def _get_wallet_balance_dp(tab, account_name: str, domain: str) -> dict:
 def _solve_turnstile_dp(tab, account_name: str) -> bool:
 	"""使用 DrissionPage (real Chrome) 解决 Cloudflare Turnstile
 
-	DrissionPage 使用真实 Chrome 进程，配合 turnstilePatch 扩展注入 CDP mouse patch，
-	指纹接近真人浏览器，managed/invisible Turnstile 有更高概率自动通过。
-
-	策略：
-	0. 检查 turnstile.getResponse() 是否已有 token（managed 模式自动解决）
-	1. 调用 turnstile.reset()/execute() 触发验证
-	2. shadow DOM 遍历找到 iframe 并点击
-	3. 轮询等待 token 出现
+	基于 grok_register.py 验证方案：
+	0. 先 turnstile.reset() 触发验证流程
+	1. 轮询 turnstile.getResponse() / input 检查 token
+	2. shadow DOM 遍历找到 iframe → 注入 CDP mouse patch → 点击 checkbox
 	"""
 	print(f'[PROCESSING] {account_name}: Looking for Turnstile verification (DrissionPage)...')
 
-	for attempt in range(30):
-		# Strategy 0: Check if token already present
+	# Trigger reset first
+	try:
+		tab.run_js('try { turnstile.reset() } catch(e) { }')
+	except Exception:
+		pass
+
+	for attempt in range(20):
+		# Check if token already present
 		try:
-			token = tab.run_js('''
-				try { const r = turnstile.getResponse(); if (r) return r; } catch(e) {}
-				const inp = document.querySelector('input[name="cf-turnstile-response"]');
-				return (inp && inp.value) ? inp.value : null;
-			''')
-			if token:
-				print(f'[SUCCESS] {account_name}: Turnstile solved (token present, attempt {attempt + 1})')
+			token = tab.run_js(
+				'try { return turnstile.getResponse() } catch(e) { return null }'
+			)
+			if token and len(str(token)) > 20:
+				print(f'[SUCCESS] {account_name}: Turnstile solved (attempt {attempt + 1})')
 				return True
 		except Exception:
 			pass
 
-		# Strategy 1: Trigger via JS API
-		if attempt == 0:
-			try:
-				tab.run_js('try { turnstile.reset(); } catch(e) {} try { turnstile.execute(); } catch(e) {}')
-				print(f'[INFO] {account_name}: Called turnstile.reset()/execute()')
-			except Exception:
-				pass
+		# Also check input field
+		try:
+			token = tab.run_js('''
+				const inp = document.querySelector('input[name="cf-turnstile-response"]');
+				return (inp && inp.value && inp.value.length > 20) ? inp.value : null;
+			''')
+			if token:
+				print(f'[SUCCESS] {account_name}: Turnstile solved via input (attempt {attempt + 1})')
+				return True
+		except Exception:
+			pass
 
-		# Strategy 2: Shadow DOM traversal — find iframe and click via coordinates
-		if attempt in (2, 8, 15):
-			try:
-				# Use JS to get iframe bounding box from shadow DOM (DrissionPage can't click ChromiumFrame directly)
-				iframe_box = tab.run_js('''
-					const resp = document.querySelector('input[name="cf-turnstile-response"]');
-					if (!resp) return null;
-					const wrapper = resp.parentElement;
-					if (!wrapper || !wrapper.shadowRoot) return null;
-					const iframe = wrapper.shadowRoot.querySelector('iframe');
-					if (!iframe) return null;
-					const rect = iframe.getBoundingClientRect();
-					if (rect.width <= 0 || rect.height <= 0) return null;
-					return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-				''')
-				if iframe_box:
-					cx = int(iframe_box['x'] + iframe_box['width'] / 2)
-					cy = int(iframe_box['y'] + iframe_box['height'] / 2)
-					print(f'[INFO] {account_name}: Found Turnstile iframe in shadow DOM ({iframe_box["width"]:.0f}x{iframe_box["height"]:.0f}), clicking ({cx},{cy})...')
-					tab.actions.click(cx, cy)
-					time.sleep(3)
-					continue
-			except Exception as e:
-				if attempt < 5:
-					print(f'[INFO] {account_name}: Shadow DOM click: {str(e)[:60]}')
+		# Shadow DOM iframe click approach (from grok_register.py)
+		try:
+			ci = tab.ele('@name=cf-turnstile-response')
+			wrapper = ci.parent()
+			iframe = wrapper.shadow_root.ele('tag:iframe')
+			# Inject CDP mouse patch directly into iframe
+			iframe.run_js(
+				"if(!window.dtp){window.dtp=1;"
+				"var r=function(a,b){return Math.floor(Math.random()*(b-a+1))+a;};"
+				"Object.defineProperty(MouseEvent.prototype,'screenX',{value:r(800,1200)});"
+				"Object.defineProperty(MouseEvent.prototype,'screenY',{value:r(400,600)});}"
+			)
+			iframe_body = iframe.ele('tag:body').shadow_root
+			iframe_body.ele('tag:input').click()
+			print(f'[INFO] {account_name}: Clicked Turnstile checkbox in iframe shadow DOM (attempt {attempt + 1})')
+		except Exception as e:
+			if attempt < 3:
+				print(f'[INFO] {account_name}: Shadow DOM click: {str(e)[:80]}')
 
-		# Retry turnstile.execute() periodically
-		if attempt in (5, 10, 15, 20, 25):
+		# Retry execute periodically
+		if attempt in (5, 10, 15):
 			try:
 				tab.run_js('try { turnstile.execute() } catch(e) {}')
 			except Exception:
@@ -808,7 +805,7 @@ def _solve_turnstile_dp(tab, account_name: str) -> bool:
 
 		time.sleep(1.5)
 
-	print(f'[FAILED] {account_name}: Turnstile not solved after 30 attempts')
+	print(f'[FAILED] {account_name}: Turnstile not solved after 20 attempts')
 	return False
 
 
@@ -819,12 +816,11 @@ def check_in_with_drissionpage(
 ):
 	"""通过 DrissionPage (real Chrome) 执行签到（含 Cloudflare Turnstile 验证）
 
-	使用真实 Chrome 浏览器代替 Playwright Chromium，避免被 Turnstile managed 模式检测为自动化工具。
-	turnstilePatch 扩展确保 CDP mouse patch 在所有 frame 中生效（含 cross-origin Turnstile iframe）。
+	使用真实 Chrome + WARP + turnstilePatch 扩展 + shadow DOM iframe 点击方案过盾。
 	"""
 	import pathlib
 
-	from DrissionPage import ChromiumOptions, ChromiumPage
+	from DrissionPage import Chromium, ChromiumOptions
 
 	user_cookies = parse_cookies(account.cookies)
 	if not user_cookies:
@@ -849,23 +845,8 @@ def check_in_with_drissionpage(
 	else:
 		print(f'[WARN] {account_name}: turnstilePatch extension not found at {ext_path}')
 
-	# Chrome path: auto-detect or fallback to Windows default
-	import shutil
-
-	chrome_path = shutil.which('chrome') or shutil.which('google-chrome')
-	if not chrome_path:
-		for candidate in [
-			r'C:\Program Files\Google\Chrome\Application\chrome.exe',
-			r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
-		]:
-			if os.path.exists(candidate):
-				chrome_path = candidate
-				break
-	if chrome_path:
-		co.set_browser_path(chrome_path)
-
-	co.headless(False)  # Headed mode required — headless Chrome is detected by Turnstile
-	page = ChromiumPage(co)
+	browser = Chromium(co)
+	page = browser.get_tab()
 
 	try:
 		domain = provider_config.domain
@@ -893,7 +874,7 @@ def check_in_with_drissionpage(
 		# Check session expiry
 		if '/login' in page.url or '/auth/signin' in page.url:
 			print(f'[FAILED] {account_name}: Session expired - redirected to login')
-			page.quit()
+			browser.quit()
 			return False, None, None
 
 		# Get balance before check-in
@@ -905,14 +886,14 @@ def check_in_with_drissionpage(
 		already_el = page.ele('text=今日已签到', timeout=2)
 		if already_el:
 			print(f'[SUCCESS] {account_name}: Already checked in today')
-			page.quit()
+			browser.quit()
 			return True, user_info_before, user_info_before
 
 		# Find check-in button
 		checkin_btn = page.ele('tag:button@@text():立即签到', timeout=3) or page.ele('tag:button@@text():签到', timeout=2)
 		if not checkin_btn:
 			print(f'[FAILED] {account_name}: Check-in button not found on page')
-			page.quit()
+			browser.quit()
 			return False, user_info_before, None
 
 		# Click check-in button
@@ -924,7 +905,7 @@ def check_in_with_drissionpage(
 		turnstile_solved = _solve_turnstile_dp(page, account_name)
 		if not turnstile_solved:
 			print(f'[FAILED] {account_name}: Failed to solve Turnstile verification')
-			page.quit()
+			browser.quit()
 			return False, user_info_before, None
 
 		# Wait for check-in completion
@@ -946,13 +927,13 @@ def check_in_with_drissionpage(
 		time.sleep(2)
 		user_info_after = _get_wallet_balance_dp(page, account_name, domain)
 
-		page.quit()
+		browser.quit()
 		return success, user_info_before, user_info_after
 
 	except Exception as e:
 		print(f'[FAILED] {account_name}: DrissionPage check-in error - {str(e)[:100]}')
 		try:
-			page.quit()
+			browser.quit()
 		except Exception:
 			pass
 		return False, None, None

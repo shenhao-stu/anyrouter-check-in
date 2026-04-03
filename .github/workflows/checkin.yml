@@ -6,7 +6,7 @@ on:
 
 jobs:
   checkin:
-    runs-on: windows-2025
+    runs-on: ubuntu-latest
     environment: production
     env:
       PYTHONIOENCODING: utf-8
@@ -42,15 +42,15 @@ jobs:
     - name: 获取 Playwright 版本
       id: playwright-version
       run: |
-        $version = uv run python -c "import importlib.metadata; print(importlib.metadata.version('playwright'))"
-        echo "version=$version" >> $env:GITHUB_OUTPUT
+        version=$(uv run python -c "import importlib.metadata; print(importlib.metadata.version('playwright'))")
+        echo "version=$version" >> "$GITHUB_OUTPUT"
         echo "Playwright version: $version"
 
     - name: 缓存 Playwright 浏览器
       uses: actions/cache@v4
       id: playwright-cache
       with:
-        path: ~\AppData\Local\ms-playwright
+        path: ~/.cache/ms-playwright
         key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
         restore-keys: |
           ${{ runner.os }}-playwright-
@@ -61,6 +61,31 @@ jobs:
         echo "缓存未命中，开始安装 Playwright 浏览器..."
         uv run playwright install chromium --with-deps
 
+    - name: 安装 Google Chrome + WARP + Xvfb
+      run: |
+        # Install Chrome
+        wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq google-chrome-stable xvfb
+
+        # Install Cloudflare WARP
+        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq cloudflare-warp
+
+        # Register and connect WARP
+        warp-cli registration new
+        warp-cli mode warp
+        warp-cli connect
+        sleep 3
+
+        # Verify WARP connection
+        echo "WARP status:"
+        warp-cli status || true
+        curl -s https://cloudflare.com/cdn-cgi/trace | grep -E "warp|ip"
+
     - name: 恢复余额历史缓存
       uses: actions/cache@v4
       with:
@@ -70,19 +95,21 @@ jobs:
           balance-hash-
 
     - name: 注入 ANYROUTER_ACCOUNT_* secrets
-      shell: pwsh
       env:
         ALL_SECRETS: ${{ toJson(secrets) }}
       run: |
-        $secrets = $env:ALL_SECRETS | ConvertFrom-Json
-        foreach ($prop in $secrets.PSObject.Properties) {
-          if ($prop.Name -match '^ANYROUTER_ACCOUNT_') {
-            "$($prop.Name)=$($prop.Value)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          }
-        }
+        python3 -c "
+        import json, os
+        secrets = json.loads(os.environ['ALL_SECRETS'])
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            for k, v in secrets.items():
+                if k.startswith('ANYROUTER_ACCOUNT_'):
+                    f.write(f'{k}={v}\n')
+        "
 
     - name: 执行签到
       env:
+        DISPLAY: ':99'
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
         PROVIDERS: ${{ secrets.PROVIDERS }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
@@ -103,10 +130,13 @@ jobs:
         BARK_KEY: ${{ secrets.BARK_KEY }}
         BARK_SERVER: ${{ secrets.BARK_SERVER }}
       run: |
+        # Start Xvfb for headed Chrome
+        Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac &
+        sleep 1
         uv run checkin.py
 
     - name: 执行结果
       if: always()
       run: |
         echo "签到任务执行完成"
-        echo "时间: $(Get-Date)"
+        echo "时间: $(date)"
