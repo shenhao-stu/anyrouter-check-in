@@ -76,9 +76,9 @@ jobs:
         sudo apt-get install -y -qq cloudflare-warp
 
         # Register and connect WARP
-        warp-cli registration new --accept-tos
-        warp-cli mode warp
-        warp-cli connect
+        warp-cli --accept-tos registration new || yes | warp-cli registration new
+        warp-cli --accept-tos mode warp || warp-cli mode warp
+        warp-cli --accept-tos connect || warp-cli connect
         sleep 3
 
         # Verify WARP connection
