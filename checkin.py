@@ -748,11 +748,17 @@ def _solve_turnstile_dp(tab, account_name: str) -> bool:
 	"""
 	print(f'[PROCESSING] {account_name}: Looking for Turnstile verification (DrissionPage)...')
 
-	# Trigger reset first
+	# Trigger reset first, then let managed mode try auto-solve
 	try:
 		tab.run_js('try { turnstile.reset() } catch(e) { }')
 	except Exception:
 		pass
+	time.sleep(2)  # Give managed mode time to auto-solve
+	try:
+		tab.run_js('try { turnstile.execute() } catch(e) { }')
+	except Exception:
+		pass
+	time.sleep(2)  # Wait for execution
 
 	clicked = False
 	for attempt in range(25):
@@ -814,10 +820,39 @@ def _solve_turnstile_dp(tab, account_name: str) -> bool:
 				"Object.defineProperty(MouseEvent.prototype,'screenX',{value:r(800,1200)});"
 				"Object.defineProperty(MouseEvent.prototype,'screenY',{value:r(400,600)});}"
 			)
-			iframe_body = iframe.ele('tag:body').shadow_root
-			iframe_body.ele('tag:input').click()
+			# Try shadow DOM input click first
+			try:
+				iframe_body = iframe.ele('tag:body').shadow_root
+				iframe_body.ele('tag:input').click()
+			except Exception:
+				pass
+			# Also try coordinate-based click on the iframe (like Patchright approach)
+			iframe_box = tab.run_js('''
+				const resp = document.querySelector('input[name="cf-turnstile-response"]');
+				if (!resp) return null;
+				const w = resp.parentElement;
+				if (!w || !w.shadowRoot) return null;
+				const f = w.shadowRoot.querySelector('iframe');
+				if (!f) return null;
+				const r = f.getBoundingClientRect();
+				return r.width > 0 ? { x: r.x, y: r.y, w: r.width, h: r.height } : null;
+			''')
+			if iframe_box:
+				# Click at checkbox position (left side, like Patchright)
+				cx = int(iframe_box['x'] + min(28, max(18, iframe_box['w'] * 0.08)))
+				cy = int(iframe_box['y'] + iframe_box['h'] / 2)
+				tab.actions.move(cx, cy).wait(.1).click()
+				print(f'[INFO] {account_name}: Clicked Turnstile at ({cx},{cy}) iframe={iframe_box["w"]:.0f}x{iframe_box["h"]:.0f} (attempt {attempt + 1})')
+			else:
+				print(f'[INFO] {account_name}: Clicked via shadow DOM (attempt {attempt + 1})')
 			clicked = True
-			print(f'[INFO] {account_name}: Clicked Turnstile checkbox in iframe shadow DOM (attempt {attempt + 1})')
+			# Screenshot on first click for diagnostics
+			if attempt < 2:
+				try:
+					tab.get_screenshot(path=f'/tmp/turnstile_attempt_{attempt + 1}.png')
+					print(f'[DEBUG] {account_name}: Screenshot saved to /tmp/turnstile_attempt_{attempt + 1}.png')
+				except Exception:
+					pass
 			time.sleep(3)  # Wait longer after click for Turnstile to process
 			continue
 		except Exception as e:
