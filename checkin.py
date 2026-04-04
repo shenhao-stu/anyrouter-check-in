@@ -785,13 +785,22 @@ def _solve_turnstile_dp(tab, account_name: str) -> bool:
 			if '今日已签到' in body_text or '签到成功' in body_text:
 				print(f'[SUCCESS] {account_name}: Check-in completed (page navigated after Turnstile, attempt {attempt + 1})')
 				return True
-		except Exception:
-			pass
+			# Diagnostic: log page state periodically after click
+			if clicked and attempt in (2, 5, 10, 15):
+				snippet = body_text[:200].replace('\n', ' ').strip()
+				print(f'[DEBUG] {account_name}: attempt={attempt + 1} URL={tab.url} body=[{snippet}]')
+		except Exception as e:
+			if clicked and attempt <= 5:
+				print(f'[DEBUG] {account_name}: Page access error: {str(e)[:80]}')
 
 		# After first successful click, wait longer and focus on token/page checks
 		if clicked:
 			time.sleep(2)
-			continue
+			# After 8 polls, allow re-clicking
+			if attempt >= 8 and attempt % 4 == 0:
+				clicked = False
+			else:
+				continue
 
 		# Shadow DOM iframe click approach (from grok_register.py)
 		try:
@@ -821,9 +830,6 @@ def _solve_turnstile_dp(tab, account_name: str) -> bool:
 				tab.run_js('try { turnstile.execute() } catch(e) {}')
 			except Exception:
 				pass
-			# Reset clicked flag to allow retry clicking
-			if attempt >= 10:
-				clicked = False
 
 		time.sleep(1.5)
 
