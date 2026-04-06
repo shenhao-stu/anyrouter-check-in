@@ -61,6 +61,9 @@ jobs:
         echo "缓存未命中，开始安装 Playwright 浏览器..."
         uv run playwright install chromium --with-deps
 
+    - name: 安装 Xvfb (Playwright headless=False 需要)
+      run: sudo apt-get install -y -qq xvfb
+
     - name: 恢复余额历史缓存
       uses: actions/cache@v4
       with:
@@ -104,7 +107,10 @@ jobs:
         BARK_KEY: ${{ secrets.BARK_KEY }}
         BARK_SERVER: ${{ secrets.BARK_SERVER }}
       run: |
-        uv run checkin.py
+        # Xvfb needed for Playwright headless=False (WAF cookie fetch)
+        Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac &
+        sleep 1
+        DISPLAY=:99 uv run checkin.py
 
     - name: 执行结果
       if: always()
