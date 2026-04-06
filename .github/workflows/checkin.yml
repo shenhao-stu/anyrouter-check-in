@@ -61,31 +61,6 @@ jobs:
         echo "缓存未命中，开始安装 Playwright 浏览器..."
         uv run playwright install chromium --with-deps
 
-    - name: 安装 Google Chrome + WARP + Xvfb
-      run: |
-        # Install Chrome
-        wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
-        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq google-chrome-stable xvfb
-
-        # Install Cloudflare WARP
-        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq cloudflare-warp
-
-        # Register and connect WARP
-        warp-cli --accept-tos registration new || yes | warp-cli registration new
-        warp-cli --accept-tos mode warp || warp-cli mode warp
-        warp-cli --accept-tos connect || warp-cli connect
-        sleep 3
-
-        # Verify WARP connection
-        echo "WARP status:"
-        warp-cli status || true
-        curl -s https://cloudflare.com/cdn-cgi/trace | grep -E "warp|ip"
-
     - name: 恢复余额历史缓存
       uses: actions/cache@v4
       with:
@@ -109,7 +84,6 @@ jobs:
 
     - name: 执行签到
       env:
-        DISPLAY: ':99'
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
         PROVIDERS: ${{ secrets.PROVIDERS }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
@@ -130,9 +104,6 @@ jobs:
         BARK_KEY: ${{ secrets.BARK_KEY }}
         BARK_SERVER: ${{ secrets.BARK_SERVER }}
       run: |
-        # Start Xvfb for headed Chrome
-        Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac &
-        sleep 1
         uv run checkin.py
 
     - name: 执行结果

@@ -711,7 +711,160 @@ async def _get_wallet_balance(page, account_name: str, domain: str) -> dict:
 		return {'success': False, 'error': f'Failed to get balance: {str(e)[:50]}'}
 
 
-# ─── DrissionPage (real Chrome) check-in for Turnstile-protected sites ────────
+# ─── Heibai PoW Captcha solver (cap.js) — no browser needed ─────────────────
+
+CAP_API_ENDPOINT = 'https://cap.hybgzs.com/f96f595e4c/'
+
+
+def _cap_fnv1a(s: str) -> int:
+	"""FNV-1a hash (cap.js variant)."""
+	h = 2166136261
+	for c in s:
+		h ^= ord(c)
+		h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) & 0xFFFFFFFF
+	return h
+
+
+def _cap_prng(seed: str, length: int) -> str:
+	"""cap.js PRNG: FNV-1a seeded xorshift → hex string."""
+	state = _cap_fnv1a(seed)
+
+	def xorshift():
+		nonlocal state
+		state ^= (state << 13) & 0xFFFFFFFF
+		state ^= (state >> 17)
+		state ^= (state << 5) & 0xFFFFFFFF
+		return state & 0xFFFFFFFF
+
+	result = ''
+	while len(result) < length:
+		result += format(xorshift(), '08x')
+	return result[:length]
+
+
+def _solve_cap_challenge(token: str, c: int, s_len: int, d_len: int) -> list[int]:
+	"""Solve cap.js PoW challenges: find nonces where SHA256(salt+nonce) starts with target."""
+	import hashlib
+
+	solutions = []
+	for i in range(1, c + 1):
+		salt = _cap_prng(f'{token}{i}', s_len)
+		target = _cap_prng(f'{token}{i}d', d_len)
+		for nonce in range(1_000_000):
+			h = hashlib.sha256(f'{salt}{nonce}'.encode()).hexdigest()
+			if h.startswith(target):
+				solutions.append(nonce)
+				break
+		else:
+			solutions.append(0)
+	return solutions
+
+
+def check_in_heibai_api(
+	account,
+	account_name: str,
+	provider_config,
+):
+	"""Heibai check-in via direct API + cap.js PoW solver — no browser needed.
+
+	Flow: /api/checkin/status → cap challenge → solve PoW → redeem → /api/checkin
+	"""
+	user_cookies = parse_cookies(account.cookies)
+	if not user_cookies:
+		print(f'[FAILED] {account_name}: Invalid configuration format')
+		return False, None, None
+
+	domain = provider_config.domain
+	session = httpx.Client(http2=True, timeout=30.0)
+	session.cookies.update(user_cookies)
+
+	try:
+		# Check balance before
+		user_info_before = None
+		try:
+			resp = session.get(f'{domain}/api/wallet/balance')
+			data = resp.json()
+			if data.get('success') and data.get('data'):
+				total = data['data'].get('total', 0)
+				quota = round(total / 500000, 2)
+				user_info_before = {'success': True, 'quota': quota, 'used_quota': 0, 'display': f'💰 Current balance: ${quota}'}
+				print(user_info_before['display'])
+		except Exception as e:
+			print(f'[WARN] {account_name}: Balance check failed: {str(e)[:50]}')
+
+		# Check if check-in is enabled
+		status_resp = session.get(f'{domain}/api/checkin/status')
+		status = status_resp.json()
+		if not status.get('success') or not status.get('enabled'):
+			print(f'[FAILED] {account_name}: Check-in disabled')
+			return False, user_info_before, None
+
+		cap_required = status.get('capRequired', False)
+		cap_token = ''
+
+		if cap_required:
+			print(f'[PROCESSING] {account_name}: Solving PoW captcha...')
+			# Get challenge
+			challenge_resp = session.post(CAP_API_ENDPOINT + 'challenge')
+			challenge = challenge_resp.json()
+			token = challenge['token']
+			c = challenge['challenge']['c']
+			s_len = challenge['challenge']['s']
+			d_len = challenge['challenge']['d']
+			print(f'[INFO] {account_name}: Challenge: {c} puzzles, difficulty={d_len}')
+
+			# Solve
+			solutions = _solve_cap_challenge(token, c, s_len, d_len)
+			print(f'[INFO] {account_name}: PoW solved ({c} puzzles)')
+
+			# Redeem
+			redeem_resp = session.post(
+				CAP_API_ENDPOINT + 'redeem',
+				json={'token': token, 'solutions': solutions},
+			)
+			redeem = redeem_resp.json()
+			if not redeem.get('success') or not redeem.get('token'):
+				print(f'[FAILED] {account_name}: PoW redeem failed: {redeem.get("message", "unknown")}')
+				return False, user_info_before, None
+			cap_token = redeem['token']
+			print(f'[SUCCESS] {account_name}: PoW token obtained')
+
+		# Check in
+		print(f'[PROCESSING] {account_name}: Executing check-in...')
+		checkin_resp = session.post(
+			f'{domain}/api/checkin',
+			json={'capToken': cap_token},
+		)
+		result = checkin_resp.json()
+
+		if checkin_resp.status_code == 200 and result.get('success'):
+			msg = result.get('data', {}).get('message', 'Check-in successful')
+			consecutive = result.get('data', {}).get('consecutiveDays', 0)
+			print(f'[SUCCESS] {account_name}: {msg} (连续{consecutive}天)')
+
+			# Get balance after
+			user_info_after = None
+			try:
+				resp = session.get(f'{domain}/api/wallet/balance')
+				data = resp.json()
+				if data.get('success') and data.get('data'):
+					total = data['data'].get('total', 0)
+					quota = round(total / 500000, 2)
+					user_info_after = {'success': True, 'quota': quota, 'used_quota': 0, 'display': f'💰 Current balance: ${quota}'}
+			except Exception:
+				pass
+
+			return True, user_info_before, user_info_after
+		else:
+			error = result.get('error', checkin_resp.text[:100])
+			print(f'[FAILED] {account_name}: Check-in failed: {error}')
+			return False, user_info_before, None
+
+	except Exception as e:
+		print(f'[FAILED] {account_name}: Heibai API check-in error: {str(e)[:100]}')
+		return False, None, None
+	finally:
+		session.close()
 
 
 def _get_wallet_balance_dp(tab, account_name: str, domain: str) -> dict:
@@ -915,19 +1068,14 @@ def check_in_with_drissionpage(
 
 	print(f'[INFO] {account_name}: Using DrissionPage (real Chrome) with Turnstile bypass')
 
-	# Configure Chrome with stealth settings
+	# Configure Chrome
 	co = ChromiumOptions()
 	co.auto_port()
 	co.set_argument('--no-sandbox')
 	co.set_argument('--disable-dev-shm-usage')
 	co.set_argument('--disable-blink-features=AutomationControlled')
 	co.set_argument('--window-size=1280,900')
-	co.set_argument('--disable-features=IsolateOrigins,site-per-process')
-	co.set_argument('--disable-site-isolation-trials')
-	co.set_argument('--disable-web-security')
 	co.set_user_agent(PLAYWRIGHT_USER_AGENT)
-	co.set_pref('credentials_enable_service', False)
-	co.set_pref('profile.password_manager_enabled', False)
 
 	# Load turnstilePatch extension
 	ext_path = str(pathlib.Path(__file__).parent / 'turnstilePatch')
@@ -940,34 +1088,21 @@ def check_in_with_drissionpage(
 	page = browser.get_tab()
 
 	try:
-		# Inject stealth patches before any navigation
-		page.run_js('''
-			// Remove webdriver flag
-			Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-			// Override plugins
-			Object.defineProperty(navigator, 'plugins', {
-				get: () => [1, 2, 3, 4, 5],
-			});
-			// Override languages
-			Object.defineProperty(navigator, 'languages', {
-				get: () => ['zh-CN', 'zh', 'en-US', 'en'],
-			});
-			// Chrome runtime
-			window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
-			// Override permissions
-			const originalQuery = window.navigator.permissions.query;
-			window.navigator.permissions.query = (parameters) =>
-				parameters.name === 'notifications'
-					? Promise.resolve({ state: Notification.permission })
-					: originalQuery(parameters);
-		''')
-
 		domain = provider_config.domain
 		hostname = urlparse(domain).hostname
 
 		# Navigate to domain root to establish context, then set cookies
 		page.get(domain)
 		time.sleep(1)
+
+		# Wait for Cloudflare JS challenge ("Just a moment...") to pass
+		for _i in range(15):
+			title = page.title or ''
+			if 'Just a moment' not in title and '__cf_chl' not in page.url:
+				break
+			time.sleep(2)
+		else:
+			print(f'[WARN] {account_name}: Cloudflare JS challenge did not resolve in 30s')
 
 		for name, value in user_cookies.items():
 			page.set.cookies({
@@ -1208,9 +1343,9 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
 
-	# 自定义浏览器签到（含 Turnstile 验证，如 heibai）— 使用 DrissionPage (real Chrome)
+	# 自定义签到（heibai）— 纯 API + PoW 验证码，无需浏览器
 	if provider_config.needs_browser_checkin():
-		return await asyncio.to_thread(check_in_with_drissionpage, account, account_name, provider_config)
+		return check_in_heibai_api(account, account_name, provider_config)
 
 	# Cloudflare 防护站点：通过 Playwright 浏览器内 fetch 执行所有请求
 	if provider_config.needs_playwright():
