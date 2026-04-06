@@ -112,7 +112,7 @@ class AppConfig:
 				name='heibai',
 				domain='https://cdk.hybgzs.com',
 				login_path='/login',
-				sign_in_path=None,  # 通过浏览器交互签到，非 API
+				sign_in_path=None,  # 通过纯 API + PoW 验证码签到
 				user_info_path='/api/wallet/balance',
 				api_user_key='',  # Session-based auth, no api_user header
 				bypass_method='turnstile_browser',

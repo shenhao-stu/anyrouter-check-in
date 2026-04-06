@@ -12,3 +12,5 @@ balance_hash.txt
 
 .DS_Store
 test_heibai_local.py
+heibai_checkin_vps.py
+screenshot_*.png
