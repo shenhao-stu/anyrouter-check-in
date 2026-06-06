@@ -85,7 +85,7 @@ jobs:
                     f.write(f'{k}={v}\n')
         "
 
-    - name: 执行签到
+    - name: 执行逐账号诊断（临时分支，不发通知）
       env:
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
         PROVIDERS: ${{ secrets.PROVIDERS }}
@@ -106,11 +106,12 @@ jobs:
         GOTIFY_PRIORITY: ${{ secrets.GOTIFY_PRIORITY }}
         BARK_KEY: ${{ secrets.BARK_KEY }}
         BARK_SERVER: ${{ secrets.BARK_SERVER }}
+        GA_DIAG_ACCOUNT_TIMEOUT: '180'
       run: |
         # Xvfb needed for Playwright headless=False (WAF cookie fetch)
         Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac &
         sleep 1
-        DISPLAY=:99 uv run checkin.py
+        DISPLAY=:99 uv run python -u scripts/diagnose_accounts.py --timeout "$GA_DIAG_ACCOUNT_TIMEOUT"
 
     - name: 执行结果
       if: always()
