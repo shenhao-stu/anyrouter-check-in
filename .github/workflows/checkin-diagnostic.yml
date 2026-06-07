@@ -1,0 +1,64 @@
+name: AnyRouter 账号状态诊断
+on:
+  workflow_dispatch:
+    inputs:
+      account_timeout:
+        description: 'Per-account timeout seconds'
+        required: false
+        default: '180'
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUNBUFFERED: '1'
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: astral-sh/setup-uv@v3
+      with:
+        version: latest
+
+    - name: 安装依赖
+      run: uv sync
+
+    - name: 缓存 Playwright 浏览器
+      uses: actions/cache@v4
+      id: playwright-cache
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+        restore-keys: |
+          playwright-${{ runner.os }}-
+
+    - name: 安装 Playwright 浏览器
+      if: steps.playwright-cache.outputs.cache-hit != 'true'
+      run: uv run playwright install chromium --with-deps
+
+    - name: 安装 Xvfb
+      run: sudo apt-get install -y -qq xvfb
+
+    - name: 注入 ANYROUTER_ACCOUNT_* secrets
+      env:
+        ALL_SECRETS: ${{ toJson(secrets) }}
+      run: |
+        python3 - <<'PY'
+        import json, os
+        secrets = json.loads(os.environ['ALL_SECRETS'])
+        with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as f:
+            for k, v in secrets.items():
+                if k.startswith('ANYROUTER_ACCOUNT_'):
+                    f.write(f'{k}={v}\n')
+        PY
+
+    - name: 执行隔离账号诊断（无通知）
+      env:
+        ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
+        PROVIDERS: ${{ secrets.PROVIDERS }}
+        GA_DIAG_ACCOUNT_TIMEOUT: ${{ github.event.inputs.account_timeout }}
+      run: |
+        Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac &
+        sleep 1
+        DISPLAY=:99 uv run python -u scripts/diagnose_accounts.py --timeout "${GA_DIAG_ACCOUNT_TIMEOUT:-180}"
