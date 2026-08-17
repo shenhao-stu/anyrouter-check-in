@@ -79,6 +79,7 @@ async def get_waf_cookies_with_playwright(account_name: str, login_url: str, req
 			context = await p.chromium.launch_persistent_context(
 				user_data_dir=temp_dir,
 				headless=False,
+				proxy=_get_playwright_proxy(),
 				user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
 				viewport={'width': 1920, 'height': 1080},
 				args=[
@@ -130,6 +131,18 @@ async def get_waf_cookies_with_playwright(account_name: str, login_url: str, req
 				print(f'[FAILED] {account_name}: Error occurred while getting WAF cookies: {e}')
 				await context.close()
 				return None
+
+
+def _get_playwright_proxy() -> dict | None:
+	"""读取代理配置供 Playwright 使用（GitHub Actions 无需代理，仅国内服务器备份需要）。
+
+	httpx 默认 trust_env=True 会自动读取 HTTP(S)_PROXY，但 Playwright 不会，
+	因此这里显式返回 {"server": ...}。优先 CHECKIN_PROXY，回退到 HTTPS_PROXY/HTTP_PROXY。
+	"""
+	proxy_url = os.getenv('CHECKIN_PROXY') or os.getenv('HTTPS_PROXY') or os.getenv('HTTP_PROXY')
+	if not proxy_url:
+		return None
+	return {'server': proxy_url}
 
 
 def _is_cloudflare_response(response) -> bool:
@@ -491,6 +504,7 @@ async def check_in_with_playwright(
 			context = await p.chromium.launch_persistent_context(
 				user_data_dir=temp_dir,
 				headless=False,
+				proxy=_get_playwright_proxy(),
 				user_agent=PLAYWRIGHT_USER_AGENT,
 				viewport={'width': 1920, 'height': 1080},
 				args=PLAYWRIGHT_BROWSER_ARGS,
