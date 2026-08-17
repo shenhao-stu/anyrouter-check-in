@@ -105,8 +105,10 @@ class AppConfig:
 				sign_in_path=None,  # 无签到接口：每日首个认证请求自动触发 "每日签到成功 +$25"
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
-				# acw_tc 由服务器 Set-Cookie 自动下发，httpx 直连即可，无需 Playwright
-				bypass_method=None,
+				# agentrouter 位于 Cloudflare 之后：对数据中心 IP 的 httpx 直连会返回
+				# JS 质询页（导致 JSON 解析失败）。走 Playwright 浏览器内 fetch 复用真实
+				# Chrome TLS 指纹即可绕过；服务器侧 Playwright 走 CHECKIN_PROXY 出网。
+				bypass_method='playwright',
 			),
 			# heibai 黑白站已停用（账号因自动签到检测被封禁）
 			# 'heibai': ProviderConfig(
