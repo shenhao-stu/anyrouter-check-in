@@ -6,9 +6,6 @@ on:
     - cron: '7 13 * * *'
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   checkin:
     runs-on: ubuntu-latest
@@ -129,18 +126,3 @@ jobs:
       run: |
         echo "签到任务执行完成"
         echo "时间: $(date)"
-
-    - name: Keepalive（防止仓库 60 天不活跃导致定时任务被自动禁用）
-      if: always()
-      run: |
-        last_commit=$(git log -1 --format=%ct)
-        now=$(date +%s)
-        days=$(( (now - last_commit) / 86400 ))
-        echo "距离上次提交已 ${days} 天"
-        if [ "$days" -ge 45 ]; then
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit --allow-empty -m "chore: keepalive to prevent scheduled workflow auto-disable"
-          git push
-          echo "已推送 keepalive 空提交"
-        fi
