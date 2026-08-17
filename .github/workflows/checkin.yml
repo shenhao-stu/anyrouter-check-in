@@ -1,8 +1,13 @@
 name: AnyRouter 自动签到
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    # 北京时间约 08:23 与 21:07（UTC+8），再叠加 0-40 分钟随机延迟，模拟真人签到时间
+    - cron: '23 0 * * *'
+    - cron: '7 13 * * *'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   checkin:
@@ -11,6 +16,13 @@ jobs:
     env:
       PYTHONIOENCODING: utf-8
     steps:
+    - name: 随机延迟（模拟真人签到时间，避开整点流量）
+      if: github.event_name == 'schedule'
+      run: |
+        delay=$(( RANDOM % 2400 ))
+        echo "随机延迟 ${delay} 秒后开始签到"
+        sleep $delay
+
     - uses: actions/checkout@v4
 
     - uses: astral-sh/setup-uv@v3
@@ -117,3 +129,18 @@ jobs:
       run: |
         echo "签到任务执行完成"
         echo "时间: $(date)"
+
+    - name: Keepalive（防止仓库 60 天不活跃导致定时任务被自动禁用）
+      if: always()
+      run: |
+        last_commit=$(git log -1 --format=%ct)
+        now=$(date +%s)
+        days=$(( (now - last_commit) / 86400 ))
+        echo "距离上次提交已 ${days} 天"
+        if [ "$days" -ge 45 ]; then
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keepalive to prevent scheduled workflow auto-disable"
+          git push
+          echo "已推送 keepalive 空提交"
+        fi

@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import os
+import random
 import sys
 import time
 from datetime import datetime
@@ -477,7 +478,7 @@ async def check_in_with_playwright(
 ):
 	"""通过 Playwright 浏览器内 fetch 执行签到（绕过 Cloudflare TLS 指纹校验）"""
 	user_cookies = parse_cookies(account.cookies)
-	if not user_cookies:
+	if not user_cookies and not account.access_token:
 		print(f'[FAILED] {account_name}: Invalid configuration format')
 		return False, None, None
 
@@ -528,19 +529,22 @@ async def check_in_with_playwright(
 				# 使用浏览器内 fetch 调用 API（共享 Chrome TLS 指纹）
 				api_user_key = provider_config.api_user_key
 				api_user = account.api_user
+				access_token = account.access_token or ''
 
 				# 获取签到前用户信息
 				user_info_before = None
 				for attempt in range(1, MAX_RETRIES + 1):
 					result = await page.evaluate(
-						"""async ([path, key, user]) => {
+						"""async ([path, key, user, token]) => {
 							try {
-								const r = await fetch(path, {headers: {[key]: user}});
+								const headers = {[key]: user};
+								if (token) headers['Authorization'] = token;
+								const r = await fetch(path, {headers});
 								if (!r.ok) return {success: false, error: 'HTTP ' + r.status};
 								return await r.json();
 							} catch(e) { return {success: false, error: e.message}; }
 						}""",
-						[provider_config.user_info_path, api_user_key, api_user],
+						[provider_config.user_info_path, api_user_key, api_user, access_token],
 					)
 					parsed = _parse_user_info_json(result) if result.get('success') else result
 					if parsed.get('success'):
@@ -562,12 +566,13 @@ async def check_in_with_playwright(
 					sign_in_path = provider_config.sign_in_path
 					print(f'[NETWORK] {account_name}: Executing check-in via browser fetch')
 					checkin_result = await page.evaluate(
-						"""async ([path, fallbackPath, key, user]) => {
+						"""async ([path, fallbackPath, key, user, token]) => {
 							const headers = {
 								'Content-Type': 'application/json',
 								'X-Requested-With': 'XMLHttpRequest',
 								[key]: user
 							};
+							if (token) headers['Authorization'] = token;
 							try {
 								let r = await fetch(path, {method: 'POST', headers});
 								if (r.status === 404 && path !== fallbackPath) {
@@ -579,7 +584,7 @@ async def check_in_with_playwright(
 								return {status, body};
 							} catch(e) { return {status: 0, body: {error: e.message}}; }
 						}""",
-						[sign_in_path, NEW_API_CHECKIN_PATH, api_user_key, api_user],
+						[sign_in_path, NEW_API_CHECKIN_PATH, api_user_key, api_user, access_token],
 					)
 					status = checkin_result.get('status', 0)
 					body = checkin_result.get('body', {})
@@ -642,21 +647,34 @@ async def check_in_with_playwright(
 					else:
 						print(f'[FAILED] {account_name}: Check-in failed - HTTP {status}')
 				else:
-					print(f'[INFO] {account_name}: Check-in completed automatically (triggered by user info request)')
-					success = True
+					# 自动签到平台（如 agentrouter）：任一认证请求即触发当日签到。
+					# 必须验证用户信息请求真实成功，否则视为失败（避免假成功）。
+					auto_ok = bool(user_info_before and user_info_before.get('success'))
+					if auto_ok:
+						print(f'[INFO] {account_name}: Check-in completed automatically (triggered by user info request)')
+					else:
+						print(f'[FAILED] {account_name}: Auto check-in could not be verified (user info request failed)')
+					success = auto_ok
 
 				# 获取签到后用户信息
 				result_after = await page.evaluate(
-					"""async ([path, key, user]) => {
+					"""async ([path, key, user, token]) => {
 						try {
-							const r = await fetch(path, {headers: {[key]: user}});
+							const headers = {[key]: user};
+							if (token) headers['Authorization'] = token;
+							const r = await fetch(path, {headers});
 							if (!r.ok) return {success: false, error: 'HTTP ' + r.status};
 							return await r.json();
 						} catch(e) { return {success: false, error: e.message}; }
 					}""",
-					[provider_config.user_info_path, api_user_key, api_user],
+					[provider_config.user_info_path, api_user_key, api_user, access_token],
 				)
 				user_info_after = _parse_user_info_json(result_after) if result_after.get('success') else result_after
+
+				# 自动签到平台：before 失败但 after 成功也算签到成功
+				if not provider_config.needs_manual_check_in() and not success and user_info_after.get('success'):
+					print(f'[INFO] {account_name}: Auto check-in verified via post-request user info')
+					success = True
 
 				await context.close()
 				return success, user_info_before, user_info_after
@@ -842,12 +860,12 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		return await check_in_with_playwright(account, account_name, provider_config)
 
 	user_cookies = parse_cookies(account.cookies)
-	if not user_cookies:
+	if not user_cookies and not account.access_token:
 		print(f'[FAILED] {account_name}: Invalid configuration format')
 		return False, None, None
 
 	all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
-	if not all_cookies:
+	if all_cookies is None:
 		return False, None, None
 
 	client = httpx.Client(http2=True, timeout=30.0)
@@ -869,6 +887,10 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			'Sec-Fetch-Site': 'same-origin',
 			provider_config.api_user_key: account.api_user,
 		}
+		# 系统访问令牌认证：存储于数据库，站点重启/重新部署后依然有效，
+		# 优先于易失效的 session cookie
+		if account.access_token:
+			headers['Authorization'] = account.access_token
 
 		user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
 
@@ -918,10 +940,18 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			user_info_after = get_user_info(client, headers, user_info_url)
 			return success, user_info_before, user_info_after
 		else:
-			print(f'[INFO] {account_name}: Check-in completed automatically (triggered by user info request)')
-			# 自动签到的情况，再次获取用户信息
+			# 自动签到平台（如 agentrouter）：任一认证请求即触发当日签到。
+			# 必须验证用户信息请求真实成功，否则视为失败（避免假成功）。
 			user_info_after = get_user_info(client, headers, user_info_url)
-			return True, user_info_before, user_info_after
+			auto_ok = bool(
+				(user_info_before and user_info_before.get('success'))
+				or (user_info_after and user_info_after.get('success'))
+			)
+			if auto_ok:
+				print(f'[INFO] {account_name}: Check-in completed automatically (triggered by user info request)')
+			else:
+				print(f'[FAILED] {account_name}: Auto check-in could not be verified (user info request failed)')
+			return auto_ok, user_info_before, user_info_after
 
 	except Exception as e:
 		error_msg = str(e)[:100]
@@ -942,7 +972,11 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 					return success, user_info_before, user_info_after
 				else:
 					user_info_after = get_user_info(client, headers, user_info_url)
-					return True, user_info_before, user_info_after
+					auto_ok = bool(
+						(user_info_before and user_info_before.get('success'))
+						or (user_info_after and user_info_after.get('success'))
+					)
+					return auto_ok, user_info_before, user_info_after
 			except Exception as e2:
 				error_msg = str(e2)[:100]
 			print(f'[FAILED] {account_name}: Error occurred during check-in process - {error_msg}')
@@ -982,6 +1016,11 @@ async def main():
 
 	for i, account in enumerate(accounts):
 		account_key = f'account_{i + 1}'
+		# 账号间随机间隔，避免短时间大量请求触发 WAF 限速（Aug 6 大量 403 的成因）
+		if i > 0:
+			jitter = random.uniform(4, 15)
+			print(f'[INFO] Waiting {jitter:.1f}s before next account (WAF rate-limit mitigation)')
+			await asyncio.sleep(jitter)
 		try:
 			success, user_info_before, user_info_after = await check_in_account(account, i, app_config)
 			if success:

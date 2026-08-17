@@ -102,11 +102,11 @@ class AppConfig:
 				name='agentrouter',
 				domain='https://agentrouter.org',
 				login_path='/login',
-				sign_in_path=None,  # 无需签到接口，查询用户信息时自动完成签到
+				sign_in_path=None,  # 无签到接口：每日首个认证请求自动触发 "每日签到成功 +$25"
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
-				bypass_method='waf_cookies',
-				waf_cookie_names=['acw_tc'],
+				# acw_tc 由服务器 Set-Cookie 自动下发，httpx 直连即可，无需 Playwright
+				bypass_method=None,
 			),
 			# heibai 黑白站已停用（账号因自动签到检测被封禁）
 			# 'heibai': ProviderConfig(
@@ -186,6 +186,9 @@ class AccountConfig:
 	provider: str = 'anyrouter'
 	name: str | None = None
 	domain: str | None = None  # optional: injected by plugin for unknown providers
+	# new-api 系统访问令牌（个人设置页生成）。与 session cookie 不同，它存储在
+	# 数据库中，站点重启/重新部署后依然有效 —— 解决 session 一天就失效的问题。
+	access_token: str = ''
 
 	@classmethod
 	def from_dict(cls, data: dict, index: int) -> 'AccountConfig':
@@ -195,11 +198,12 @@ class AccountConfig:
 		domain = data.get('domain') or None
 
 		return cls(
-			cookies=data['cookies'],
+			cookies=data.get('cookies', {}),
 			api_user=data.get('api_user', ''),
 			provider=provider,
 			name=name if name else None,
 			domain=domain,
+			access_token=data.get('access_token', ''),
 		)
 
 	def get_display_name(self, index: int) -> str:
@@ -281,8 +285,8 @@ def _validate_account_dict(account_dict: dict, index: int) -> bool:
 	if not isinstance(account_dict, dict):
 		print(f'ERROR: Account {index + 1} configuration format is incorrect')
 		return False
-	if 'cookies' not in account_dict:
-		print(f'ERROR: Account {index + 1} missing required field (cookies)')
+	if 'cookies' not in account_dict and not account_dict.get('access_token'):
+		print(f'ERROR: Account {index + 1} missing required field (cookies or access_token)')
 		return False
 	if 'name' in account_dict and not account_dict['name']:
 		print(f'ERROR: Account {index + 1} name field cannot be empty')
