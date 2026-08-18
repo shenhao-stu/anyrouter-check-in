@@ -198,6 +198,9 @@ async def prepare_cookies(account_name: str, provider_config, user_cookies: dict
 
 NEW_API_CHECKIN_PATH = '/api/user/checkin'
 
+# 阿里云 WAF 约每 ~16 次认证请求触发限速；每处理这么多账号插入一次长冷却以重置窗口
+WAF_COOLDOWN_EVERY = 12
+
 
 def _parse_check_in_response(account_name: str, response) -> bool | str:
 	"""解析签到响应，返回是否成功。返回 'turnstile' 表示需要 Turnstile 验证。"""
@@ -1028,13 +1031,28 @@ async def main():
 	need_notify = False  # 是否需要发送通知
 	balance_changed = False  # 余额是否有变化
 
+	# 随机打乱账号处理顺序：阿里云 WAF 对单个出口 IP 约 16 次请求后开始限速，固定顺序会
+	# 导致排在末尾的相同账号每次都吃 403 而永远签不到；打乱后"尾部"账号每次不同，配合
+	# 每日两次运行即可实现全部账号的完整覆盖。余额 hash 采用稳定 key，不受顺序影响。
+	random.shuffle(accounts)
+
 	for i, account in enumerate(accounts):
 		account_key = f'account_{i + 1}'
-		# 账号间随机间隔，避免短时间大量请求触发 WAF 限速（Aug 6 大量 403 的成因）
+		# 稳定标识（provider + api_user/名称），用于余额 hash，保证打乱顺序后 hash 不变，
+		# 避免每次运行都误判"余额变化"而重复发送通知。
+		stable_key = f'{account.provider}:{account.api_user or account.get_display_name(i)}'
+		# 账号间随机间隔，避免短时间大量请求触发 WAF 限速（Aug 6 大量 403 的成因）。
+		# 阿里云 WAF 约每 ~16 次请求触发限速，因此每处理 WAF_COOLDOWN_EVERY 个账号
+		# 插入一次长冷却，让限速窗口重置，保证大量账号也能全部签到成功。
 		if i > 0:
-			jitter = random.uniform(4, 15)
-			print(f'[INFO] Waiting {jitter:.1f}s before next account (WAF rate-limit mitigation)')
-			await asyncio.sleep(jitter)
+			if i % WAF_COOLDOWN_EVERY == 0:
+				cooldown = random.uniform(90, 150)
+				print(f'[INFO] Processed {i} accounts, cooling down {cooldown:.0f}s to reset WAF rate-limit window')
+				await asyncio.sleep(cooldown)
+			else:
+				jitter = random.uniform(6, 16)
+				print(f'[INFO] Waiting {jitter:.1f}s before next account (WAF rate-limit mitigation)')
+				await asyncio.sleep(jitter)
 		try:
 			success, user_info_before, user_info_after = await check_in_account(account, i, app_config)
 			if success:
@@ -1048,7 +1066,7 @@ async def main():
 			if user_info_after and user_info_after.get('success'):
 				current_quota = user_info_after['quota']
 				current_used = user_info_after['used_quota']
-				current_balances[account_key] = {'quota': current_quota, 'used': current_used}
+				current_balances[stable_key] = {'quota': current_quota, 'used': current_used}
 
 				# 计算签到收益
 				if user_info_before and user_info_before.get('success'):
