@@ -201,6 +201,31 @@ NEW_API_CHECKIN_PATH = '/api/user/checkin'
 # 阿里云 WAF 约每 ~16 次认证请求触发限速；每处理这么多账号插入一次长冷却以重置窗口
 WAF_COOLDOWN_EVERY = 12
 
+# 可选的出口 IP 轮换命令：阿里云 WAF 限速是"按出口 IP"且惩罚持续较久，靠等待难以在单次
+# 运行内解除。若设置了 CHECKIN_IP_ROTATE_CMD（如服务器上重启 WARP/usque 代理换 IP），则在
+# 每次 WAF 冷却时执行它，让后半批账号从全新出口 IP 发起请求，彻底绕开前半批积累的限速。
+# 未设置时保持通用逻辑（仅等待），不影响 GitHub Actions 等其它环境。
+IP_ROTATE_CMD = os.getenv('CHECKIN_IP_ROTATE_CMD', '').strip()
+
+
+async def rotate_exit_ip() -> None:
+	"""执行配置的出口 IP 轮换命令并等待代理恢复，用于在运行中途重置 WAF 限速窗口。"""
+	if not IP_ROTATE_CMD:
+		return
+	print(f'[INFO] Rotating exit IP via: {IP_ROTATE_CMD}')
+	try:
+		proc = await asyncio.create_subprocess_shell(
+			IP_ROTATE_CMD,
+			stdout=asyncio.subprocess.PIPE,
+			stderr=asyncio.subprocess.STDOUT,
+		)
+		out, _ = await asyncio.wait_for(proc.communicate(), timeout=90)
+		if out:
+			print(f'[INFO] IP rotate output: {out.decode(errors="replace").strip()[:300]}')
+		print(f'[INFO] IP rotation finished (exit code {proc.returncode})')
+	except Exception as e:
+		print(f'[WARN] IP rotation failed: {e}')
+
 
 def _parse_check_in_response(account_name: str, response) -> bool | str:
 	"""解析签到响应，返回是否成功。返回 'turnstile' 表示需要 Turnstile 验证。"""
@@ -1035,6 +1060,7 @@ async def main():
 	# 导致排在末尾的相同账号每次都吃 403 而永远签不到；打乱后"尾部"账号每次不同，配合
 	# 每日两次运行即可实现全部账号的完整覆盖。余额 hash 采用稳定 key，不受顺序影响。
 	random.shuffle(accounts)
+	failed_accounts: list[tuple[int, AccountConfig, str, str]] = []
 
 	for i, account in enumerate(accounts):
 		account_key = f'account_{i + 1}'
@@ -1046,9 +1072,16 @@ async def main():
 		# 插入一次长冷却，让限速窗口重置，保证大量账号也能全部签到成功。
 		if i > 0:
 			if i % WAF_COOLDOWN_EVERY == 0:
-				cooldown = random.uniform(90, 150)
-				print(f'[INFO] Processed {i} accounts, cooling down {cooldown:.0f}s to reset WAF rate-limit window')
-				await asyncio.sleep(cooldown)
+				# 优先通过轮换出口 IP 重置 WAF 限速（比等待更彻底）；若未配置轮换命令则退回长冷却。
+				if IP_ROTATE_CMD:
+					await rotate_exit_ip()
+					settle = random.uniform(8, 16)
+					print(f'[INFO] Processed {i} accounts, rotated exit IP, settling {settle:.0f}s')
+					await asyncio.sleep(settle)
+				else:
+					cooldown = random.uniform(90, 150)
+					print(f'[INFO] Processed {i} accounts, cooling down {cooldown:.0f}s to reset WAF rate-limit window')
+					await asyncio.sleep(cooldown)
 			else:
 				jitter = random.uniform(6, 16)
 				print(f'[INFO] Waiting {jitter:.1f}s before next account (WAF rate-limit mitigation)')
@@ -1061,6 +1094,7 @@ async def main():
 			if not success:
 				account_name = account.get_display_name(i)
 				print(f'[WARN] {account_name} check-in failed')
+				failed_accounts.append((i, account, account_key, stable_key))
 
 			# 存储签到前后的余额信息
 			if user_info_after and user_info_after.get('success'):
@@ -1140,6 +1174,7 @@ async def main():
 		except Exception as e:
 			account_name = account.get_display_name(i)
 			print(f'[FAILED] {account_name} processing exception: {e}')
+			failed_accounts.append((i, account, account_key, stable_key))
 			provider_config_for_detail = app_config.get_provider(account.provider)
 			account_check_in_details[account_key] = {
 				'name': account_name,
@@ -1155,6 +1190,58 @@ async def main():
 				'success': False,
 				'error_message': str(e)[:100],
 			}
+
+	# 对首轮失败账号换出口 IP（或长冷却）后再试一次，吃掉 WAF 尾部 403。
+	if failed_accounts:
+		print(f'[INFO] {len(failed_accounts)} accounts failed, starting one retry pass')
+		if IP_ROTATE_CMD:
+			await rotate_exit_ip()
+			settle = random.uniform(8, 16)
+			print(f'[INFO] Rotated exit IP before retry, settling {settle:.0f}s')
+			await asyncio.sleep(settle)
+		else:
+			cooldown = random.uniform(90, 150)
+			print(f'[INFO] Cooling down {cooldown:.0f}s before retry to reset WAF rate-limit window')
+			await asyncio.sleep(cooldown)
+		for n, (i, account, account_key, stable_key) in enumerate(failed_accounts):
+			if n > 0:
+				await asyncio.sleep(random.uniform(6, 14))
+			try:
+				success, user_info_before, user_info_after = await check_in_account(account, i, app_config)
+			except Exception as e:
+				print(f'[FAILED] {account.get_display_name(i)} retry exception: {e}')
+				continue
+			if not success:
+				print(f'[WARN] {account.get_display_name(i)} retry still failed')
+				continue
+			success_count += 1
+			print(f'[INFO] {account.get_display_name(i)} succeeded on retry')
+			if user_info_after and user_info_after.get('success'):
+				current_balances[stable_key] = {
+					'quota': user_info_after['quota'],
+					'used': user_info_after['used_quota'],
+				}
+			detail = account_check_in_details.get(account_key, {'name': account.get_display_name(i)})
+			detail['success'] = True
+			detail['error_message'] = None
+			if user_info_before and user_info_before.get('success'):
+				detail['before_quota'] = user_info_before['quota']
+				detail['before_used'] = user_info_before['used_quota']
+			if user_info_after and user_info_after.get('success'):
+				detail['after_quota'] = user_info_after['quota']
+				detail['after_used'] = user_info_after['used_quota']
+			if (
+				user_info_before
+				and user_info_before.get('success')
+				and user_info_after
+				and user_info_after.get('success')
+			):
+				total_before = user_info_before['quota'] + user_info_before['used_quota']
+				total_after = user_info_after['quota'] + user_info_after['used_quota']
+				detail['check_in_reward'] = total_after - total_before
+				detail['usage_increase'] = user_info_after['used_quota'] - user_info_before['used_quota']
+				detail['balance_change'] = user_info_after['quota'] - user_info_before['quota']
+			account_check_in_details[account_key] = detail
 
 	# 检查余额变化
 	current_balance_hash = generate_balance_hash(current_balances) if current_balances else None

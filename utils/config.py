@@ -95,7 +95,12 @@ class AppConfig:
 				sign_in_path='/api/user/sign_in',
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
-				bypass_method='waf_cookies',
+				# anyrouter 位于阿里云 WAF 之后。此前用 waf_cookies + httpx 直连：浏览器只取
+				# WAF cookie，签到/用户信息走 httpx。但 httpx 的数据中心 TLS 指纹会被 WAF 标记，
+				# 一旦触发后该 IP 的 httpx 请求长时间全部 403（而浏览器请求仍正常）。改为
+				# playwright：签到与用户信息全部在浏览器内 fetch 完成，复用真实 Chrome TLS 指纹，
+				# 彻底规避 httpx 被 WAF 标记的问题。
+				bypass_method='playwright',
 				waf_cookie_names=['acw_tc', 'cdn_sec_tc', 'acw_sc__v2'],
 			),
 			'agentrouter': ProviderConfig(
