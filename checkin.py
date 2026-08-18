@@ -96,7 +96,7 @@ async def get_waf_cookies_with_playwright(account_name: str, login_url: str, req
 			try:
 				print(f'[PROCESSING] {account_name}: Access login page to get initial cookies...')
 
-				await page.goto(login_url, wait_until='networkidle')
+				await page.goto(login_url, wait_until='domcontentloaded', timeout=30000)
 
 				try:
 					await page.wait_for_function('document.readyState === "complete"', timeout=5000)
@@ -559,14 +559,16 @@ async def check_in_with_playwright(
 					)
 
 				page = await context.new_page()
+				page.set_default_timeout(30000)
 
-				# 导航到站点，通过 Cloudflare challenge
+				# 导航到站点，通过 Cloudflare / 阿里云 WAF。不要用 networkidle：
+				# WAF 质询页会持续发请求，networkidle 在 GitHub Actions 数据中心 IP 上会一直等到超时。
 				print(f'[PROCESSING] {account_name}: Navigating to pass Cloudflare challenge...')
-				await page.goto(f'{provider_config.domain}/', wait_until='networkidle', timeout=60000)
+				await page.goto(f'{provider_config.domain}/', wait_until='domcontentloaded', timeout=30000)
 				try:
-					await page.wait_for_function('document.readyState === "complete"', timeout=10000)
+					await page.wait_for_function('document.readyState === "complete"', timeout=8000)
 				except Exception:
-					await page.wait_for_timeout(5000)
+					await page.wait_for_timeout(2000)
 
 				# 使用浏览器内 fetch 调用 API（共享 Chrome TLS 指纹）
 				api_user_key = provider_config.api_user_key
@@ -581,7 +583,7 @@ async def check_in_with_playwright(
 							try {
 								const headers = {[key]: user};
 								if (token) headers['Authorization'] = token;
-								const r = await fetch(path, {headers});
+								const r = await fetch(path, {headers, signal: AbortSignal.timeout(15000)});
 								if (!r.ok) return {success: false, error: 'HTTP ' + r.status};
 								return await r.json();
 							} catch(e) { return {success: false, error: e.message}; }
@@ -616,9 +618,9 @@ async def check_in_with_playwright(
 							};
 							if (token) headers['Authorization'] = token;
 							try {
-								let r = await fetch(path, {method: 'POST', headers});
+								let r = await fetch(path, {method: 'POST', headers, signal: AbortSignal.timeout(15000)});
 								if (r.status === 404 && path !== fallbackPath) {
-									r = await fetch(fallbackPath, {method: 'POST', headers});
+									r = await fetch(fallbackPath, {method: 'POST', headers, signal: AbortSignal.timeout(15000)});
 								}
 								const status = r.status;
 								let body;
@@ -663,7 +665,7 @@ async def check_in_with_playwright(
 											};
 											try {
 												const url = path + '?turnstile=' + encodeURIComponent(token);
-												const r = await fetch(url, {method: 'POST', headers});
+												const r = await fetch(url, {method: 'POST', headers, signal: AbortSignal.timeout(15000)});
 												const status = r.status;
 												let body;
 												try { body = await r.json(); } catch(e) { body = {_raw: await r.text()}; }
@@ -704,7 +706,7 @@ async def check_in_with_playwright(
 						try {
 							const headers = {[key]: user};
 							if (token) headers['Authorization'] = token;
-							const r = await fetch(path, {headers});
+							const r = await fetch(path, {headers, signal: AbortSignal.timeout(15000)});
 							if (!r.ok) return {success: false, error: 'HTTP ' + r.status};
 							return await r.json();
 						} catch(e) { return {success: false, error: e.message}; }
