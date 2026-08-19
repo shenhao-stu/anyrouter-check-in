@@ -1,9 +1,9 @@
 name: AnyRouter 自动签到
+# 注意：自动签到已全部迁移到自有服务器（10.176.22.9）的 cron 上执行。
+# GitHub Actions 的数据中心出口 IP 会被 anyrouter.top / agentrouter.org 的
+# 阿里云 / Cloudflare 人机验证页面拦截，导致签到几乎全部失败，因此此处已停用
+# 定时触发，仅保留手动 workflow_dispatch 作为应急备份。
 on:
-  schedule:
-    # 北京时间约 08:23 与 21:07（UTC+8），再叠加 0-40 分钟随机延迟，模拟真人签到时间
-    - cron: '23 0 * * *'
-    - cron: '7 13 * * *'
   workflow_dispatch:
 
 jobs:
