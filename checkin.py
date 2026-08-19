@@ -208,6 +208,30 @@ WAF_COOLDOWN_EVERY = 12
 IP_ROTATE_CMD = os.getenv('CHECKIN_IP_ROTATE_CMD', '').strip()
 
 
+async def safe_page_eval(page, script, arg=None, retries=3):
+	"""在浏览器内执行 evaluate，若因 WAF 质询页跳转导致执行上下文被销毁则重试。
+
+	anyrouter.top / agentrouter.org 通过后会二次跳转到真正的 SPA，evaluate 若恰好
+	赶在跳转发生时执行会抛 'Execution context was destroyed'。此处捕获这类错误，
+	等待页面重新加载完成后重试，保证 fetch 请求稳定落到已就绪的页面上。"""
+	last_err = None
+	for attempt in range(1, retries + 1):
+		try:
+			return await page.evaluate(script, arg)
+		except Exception as e:
+			msg = str(e)
+			last_err = e
+			if 'Execution context was destroyed' in msg or 'navigation' in msg.lower():
+				try:
+					await page.wait_for_load_state('domcontentloaded', timeout=15000)
+				except Exception:
+					pass
+				await page.wait_for_timeout(1500)
+				continue
+			raise
+	raise last_err
+
+
 async def rotate_exit_ip() -> None:
 	"""执行配置的出口 IP 轮换命令并等待代理恢复，用于在运行中途重置 WAF 限速窗口。"""
 	if not IP_ROTATE_CMD:
@@ -561,14 +585,20 @@ async def check_in_with_playwright(
 				page = await context.new_page()
 				page.set_default_timeout(30000)
 
-				# 导航到站点，通过 Cloudflare / 阿里云 WAF。不要用 networkidle：
-				# WAF 质询页会持续发请求，networkidle 在 GitHub Actions 数据中心 IP 上会一直等到超时。
+				# 导航到站点，通过 Cloudflare / 阿里云 WAF。先用 domcontentloaded 快速返回
+				# （避免质询页持续轮询导致 networkidle 一直等到超时），随后给 WAF 通过后的
+				# 二次跳转留出 settle 时间：networkidle 能则等，等不到（干净 IP 通常很快，
+				# 数据中心 IP 会超时）就用固定等待兜底，避免在跳转中途执行 fetch。
 				print(f'[PROCESSING] {account_name}: Navigating to pass Cloudflare challenge...')
 				await page.goto(f'{provider_config.domain}/', wait_until='domcontentloaded', timeout=30000)
 				try:
-					await page.wait_for_function('document.readyState === "complete"', timeout=8000)
+					await page.wait_for_load_state('networkidle', timeout=10000)
 				except Exception:
-					await page.wait_for_timeout(2000)
+					await page.wait_for_timeout(3000)
+				try:
+					await page.wait_for_function('document.readyState === "complete"', timeout=5000)
+				except Exception:
+					pass
 
 				# 使用浏览器内 fetch 调用 API（共享 Chrome TLS 指纹）
 				api_user_key = provider_config.api_user_key
@@ -578,7 +608,8 @@ async def check_in_with_playwright(
 				# 获取签到前用户信息
 				user_info_before = None
 				for attempt in range(1, MAX_RETRIES + 1):
-					result = await page.evaluate(
+					result = await safe_page_eval(
+						page,
 						"""async ([path, key, user, token]) => {
 							try {
 								const headers = {[key]: user};
@@ -609,7 +640,8 @@ async def check_in_with_playwright(
 				if provider_config.needs_manual_check_in():
 					sign_in_path = provider_config.sign_in_path
 					print(f'[NETWORK] {account_name}: Executing check-in via browser fetch')
-					checkin_result = await page.evaluate(
+					checkin_result = await safe_page_eval(
+						page,
 						"""async ([path, fallbackPath, key, user, token]) => {
 							const headers = {
 								'Content-Type': 'application/json',
@@ -656,7 +688,8 @@ async def check_in_with_playwright(
 								turnstile_token = await _solve_turnstile_in_page(page, provider_config.domain)
 								if turnstile_token:
 									# new-api 将 turnstile token 作为 query param 发送
-									retry_result = await page.evaluate(
+									retry_result = await safe_page_eval(
+										page,
 										"""async ([path, key, user, token]) => {
 											const headers = {
 												'Content-Type': 'application/json',
@@ -701,7 +734,8 @@ async def check_in_with_playwright(
 					success = auto_ok
 
 				# 获取签到后用户信息
-				result_after = await page.evaluate(
+				result_after = await safe_page_eval(
+					page,
 					"""async ([path, key, user, token]) => {
 						try {
 							const headers = {[key]: user};
