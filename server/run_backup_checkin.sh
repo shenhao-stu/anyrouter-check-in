@@ -7,6 +7,16 @@ cd "$REPO"
 # Needed so `systemctl --user` works under cron (no login session).
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
+# Single-instance lock: a second concurrent run restarts the WARP tunnel out from
+# under the first one (observed 2026-08-19: 19:00 cron rotation killed a manual run's
+# tunnel mid-pass). If another run is active, skip — every slot does a full pass anyway.
+LOCKFILE=/tmp/anyrouter_checkin.lock
+exec 9>"$LOCKFILE"
+if ! flock -n 9; then
+  echo "[$(date '+%F %T')] another check-in run is already active, skipping this slot"
+  exit 0
+fi
+
 # Route through local usque/WARP proxy: this host cannot reach agentrouter.org /
 # anyrouter.top directly (GFW resets TLS). httpx reads HTTPS_PROXY; Playwright reads CHECKIN_PROXY.
 export HTTP_PROXY="http://127.0.0.1:18080"

@@ -1108,16 +1108,12 @@ async def main():
 		# 插入一次长冷却，让限速窗口重置，保证大量账号也能全部签到成功。
 		if i > 0:
 			if i % WAF_COOLDOWN_EVERY == 0:
-				# 优先通过轮换出口 IP 重置 WAF 限速（比等待更彻底）；若未配置轮换命令则退回长冷却。
-				if IP_ROTATE_CMD:
-					await rotate_exit_ip()
-					settle = random.uniform(8, 16)
-					print(f'[INFO] Processed {i} accounts, rotated exit IP, settling {settle:.0f}s')
-					await asyncio.sleep(settle)
-				else:
-					cooldown = random.uniform(90, 150)
-					print(f'[INFO] Processed {i} accounts, cooling down {cooldown:.0f}s to reset WAF rate-limit window')
-					await asyncio.sleep(cooldown)
+				# 不再在中途轮换出口 IP：全浏览器（Playwright）方案下单个 IP 一整轮
+				# 也几乎不触发 403（实测 12/12 无 WAF 拦截），而重启 WARP 隧道在校园网
+				# UDP 抖动时可能数分钟起不来，会拖垮后续所有账号。仅保留长冷却。
+				cooldown = random.uniform(90, 150)
+				print(f'[INFO] Processed {i} accounts, cooling down {cooldown:.0f}s to reset WAF rate-limit window')
+				await asyncio.sleep(cooldown)
 			else:
 				jitter = random.uniform(6, 16)
 				print(f'[INFO] Waiting {jitter:.1f}s before next account (WAF rate-limit mitigation)')
@@ -1227,17 +1223,23 @@ async def main():
 				'error_message': str(e)[:100],
 			}
 
-	# 对首轮失败账号换出口 IP（或长冷却）后再试一次，吃掉 WAF 尾部 403。
+	# 对首轮失败账号再试一次。仅当失败中确实出现 WAF 403 时才轮换出口 IP：
+	# 隧道类失败（goto 超时 / ERR_TUNNEL / ERR_EMPTY_RESPONSE）说明代理本身在抖动，
+	# 此时重启 WARP 只会雪上加霜，等隧道自愈（usque --always-reconnect）更可靠。
 	if failed_accounts:
 		print(f'[INFO] {len(failed_accounts)} accounts failed, starting one retry pass')
-		if IP_ROTATE_CMD:
+		waf_suspected = any(
+			'403' in str(account_check_in_details.get(key, {}).get('error_message', ''))
+			for (_, _, key, _) in failed_accounts
+		)
+		if IP_ROTATE_CMD and waf_suspected:
 			await rotate_exit_ip()
 			settle = random.uniform(8, 16)
-			print(f'[INFO] Rotated exit IP before retry, settling {settle:.0f}s')
+			print(f'[INFO] Rotated exit IP before retry (WAF 403 seen), settling {settle:.0f}s')
 			await asyncio.sleep(settle)
 		else:
-			cooldown = random.uniform(90, 150)
-			print(f'[INFO] Cooling down {cooldown:.0f}s before retry to reset WAF rate-limit window')
+			cooldown = random.uniform(60, 120)
+			print(f'[INFO] Cooling down {cooldown:.0f}s before retry (letting proxy tunnel settle)')
 			await asyncio.sleep(cooldown)
 		for n, (i, account, account_key, stable_key) in enumerate(failed_accounts):
 			if n > 0:
